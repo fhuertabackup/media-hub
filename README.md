@@ -42,6 +42,53 @@ To learn more about developing your project with Expo, look at the following res
 - [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
 - [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
 
+## Audio transcription (OpenRouter)
+
+This project now includes a local backend endpoint for audio transcription:
+
+- API server: `server/transcription-server.mjs`
+- Endpoint: `POST /api/transcriptions`
+- Default model: `mistralai/voxtral-small-24b-2507`
+
+Setup:
+
+1. Create `.env` from `.env.example`
+2. Set `OPENROUTER_API_KEY`
+3. Set `EXPO_PUBLIC_TRANSCRIBE_API_URL`
+
+Run:
+
+```bash
+npm run api
+npm run start
+```
+
+Environment notes:
+
+- Android emulator usually needs `EXPO_PUBLIC_TRANSCRIBE_API_URL=http://10.0.2.2:4001`
+- iOS simulator can use `http://localhost:4001`
+- Physical device must use your machine LAN IP (e.g. `http://192.168.x.x:4001`)
+
+Audio limits for test mode:
+
+- Max file size: `TRANSCRIBE_MAX_FILE_MB` (default `5`)
+
+Quality controls:
+
+- `TRANSCRIBE_HINTS`: comma-separated vocabulary hints (brand names, people, product terms).
+- `TRANSCRIBE_POSTPROCESS=true`: optional extra AI pass for spelling/punctuation cleanup.
+- `OPENROUTER_POSTPROCESS_MODEL`: model for cleanup pass.
+- `OPENROUTER_ENRICH_MODEL`: model used to generate title + summary from transcript.
+- `OPENROUTER_OCR_MODEL`: model used to extract literal text from photos.
+  - Current default: `mistralai/mistral-small-3.1-24b-instruct:free` (free tier)
+
+Photo workflow:
+
+- Photos are saved by capture event (`photoGroupId`).
+- You can capture multiple photos before saving the full group.
+- After saving, OCR runs automatically per photo.
+- OCR output is tuned for medical prescriptions: returns full visible recipe text (including medications, indications, doctor and institution data when visible).
+
 ## Join the community
 
 Join our community of developers creating universal apps.

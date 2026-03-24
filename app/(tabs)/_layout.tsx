@@ -1,6 +1,6 @@
 import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { StyleSheet, View } from 'react-native';
+import { StyleSheet } from 'react-native';
 
 export default function TabsLayout() {
   return (
@@ -26,9 +26,18 @@ export default function TabsLayout() {
       <Tabs.Screen
         name="biblioteca"
         options={{
-          title: 'Biblioteca',
+          title: 'Fotos',
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="images" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="audio"
+        options={{
+          title: 'Audio',
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="mic" size={size} color={color} />
           ),
         }}
       />

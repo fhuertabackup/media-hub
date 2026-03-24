@@ -28,7 +28,7 @@ export async function getAllMedia(): Promise<MediaItem[]> {
   await ensureStorage();
 
   const raw = await FileSystem.readAsStringAsync(DB_FILE);
-  const items = JSON.parse(raw) as MediaItem[];
+  const items = safeParseMedia(raw);
 
   return items.sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
@@ -43,6 +43,14 @@ async function saveAllMedia(items: MediaItem[]) {
 export async function addMediaItem(item: MediaItem) {
   const items = await getAllMedia();
   const next = [item, ...items];
+  await saveAllMedia(next);
+}
+
+export async function updateMediaItem(itemId: string, updates: Partial<MediaItem>) {
+  const items = await getAllMedia();
+  const next = items.map((item) =>
+    item.id === itemId ? ({ ...item, ...updates } as MediaItem) : item
+  );
   await saveAllMedia(next);
 }
 
@@ -75,4 +83,13 @@ export async function copyAudioToAppStorage(sourceUri: string, fileName: string)
     to: destination,
   });
   return destination;
+}
+
+function safeParseMedia(raw: string): MediaItem[] {
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as MediaItem[]) : [];
+  } catch {
+    return [];
+  }
 }

@@ -1,20 +1,25 @@
 import React, { useCallback, useState } from 'react';
 import {
-  SafeAreaView,
+  Modal,
+  Pressable,
   ScrollView,
   StatusBar,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from 'expo-router';
+import { SectionHeaderBanner } from '../../src/components/SectionHeaderBanner';
+import { SoftScreenGradient } from '../../src/components/SoftScreenGradient';
 import { getAllMedia } from '../../src/lib/media-store';
-import { MediaItem } from '../../src/types/media';
+import { AudioItem, MediaItem } from '../../src/types/media';
 import { formatDate, formatDuration } from '../../src/utils/format';
 
 export default function HistorialScreen() {
   const [items, setItems] = useState<MediaItem[]>([]);
+  const [selected, setSelected] = useState<MediaItem | null>(null);
 
   useFocusEffect(
     useCallback(() => {
@@ -27,16 +32,21 @@ export default function HistorialScreen() {
 
   return (
     <SafeAreaView style={styles.safe}>
+      <SoftScreenGradient color="#F59E0B" />
       <StatusBar barStyle="dark-content" />
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
-        <View style={styles.headerBanner}>
-          <View style={styles.headerIcon}>
-            <Ionicons name="time" size={28} color="#FFFFFF" />
-          </View>
-          <Text style={styles.headerTitle}>Historial</Text>
-          <Text style={styles.headerSub}>
-            {items.length} elemento{items.length !== 1 ? 's' : ''} en total
-          </Text>
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={styles.content}
+        contentInsetAdjustmentBehavior="never"
+        automaticallyAdjustContentInsets={false}
+      >
+        <View style={styles.headerWrap}>
+          <SectionHeaderBanner
+            title="Historial"
+            subtitle={`${items.length} elemento${items.length !== 1 ? 's' : ''} en total`}
+            icon="time"
+            color="#312E81"
+          />
         </View>
 
         {items.length === 0 ? (
@@ -54,12 +64,7 @@ export default function HistorialScreen() {
             {items.map((item, index) => (
               <View key={item.id} style={styles.timelineRow}>
                 <View style={styles.timelineDotCol}>
-                  <View
-                    style={[
-                      styles.dot,
-                      item.type === 'photo' ? styles.dotPhoto : styles.dotAudio,
-                    ]}
-                  >
+                  <View style={[styles.dot, item.type === 'photo' ? styles.dotPhoto : styles.dotAudio]}>
                     <Ionicons
                       name={item.type === 'photo' ? 'image' : 'mic'}
                       size={14}
@@ -69,7 +74,7 @@ export default function HistorialScreen() {
                   {index < items.length - 1 && <View style={styles.line} />}
                 </View>
 
-                <View style={styles.timelineCard}>
+                <Pressable style={styles.timelineCard} onPress={() => setSelected(item)}>
                   <View style={styles.cardRow}>
                     <View
                       style={[
@@ -80,9 +85,7 @@ export default function HistorialScreen() {
                       <Text
                         style={[
                           styles.typeBadgeText,
-                          item.type === 'photo'
-                            ? styles.badgePhotoText
-                            : styles.badgeAudioText,
+                          item.type === 'photo' ? styles.badgePhotoText : styles.badgeAudioText,
                         ]}
                       >
                         {item.type === 'photo' ? 'Foto' : 'Audio'}
@@ -93,51 +96,69 @@ export default function HistorialScreen() {
                   <Text style={styles.cardTitle}>{item.title}</Text>
                   {item.type === 'audio' && (
                     <Text style={styles.cardDuration}>
-                      Duración: {formatDuration(item.durationMillis)}
+                      DUR. {formatDuration((item as AudioItem).durationMillis)}
                     </Text>
                   )}
-                </View>
+                  <Text style={styles.viewHint}>Toca para ver detalle</Text>
+                </Pressable>
               </View>
             ))}
           </View>
         )}
       </ScrollView>
+
+      <Modal visible={selected !== null} animationType="slide" transparent>
+        <View style={styles.modalBackdrop}>
+          <SafeAreaView style={styles.modalSafe}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle} numberOfLines={2}>
+                {selected?.title}
+              </Text>
+              <Pressable style={styles.closeButton} onPress={() => setSelected(null)}>
+                <Ionicons name="close" size={24} color="#FFFFFF" />
+              </Pressable>
+            </View>
+
+            <View style={styles.modalCard}>
+              <ScrollView contentContainerStyle={styles.modalContent}>
+                <Text style={styles.modalMeta}>{selected ? formatDate(selected.createdAt) : ''}</Text>
+                {selected?.type === 'audio' ? (
+                  <>
+                    <Text style={styles.detailLabel}>Duración</Text>
+                    <Text style={styles.detailValue}>{formatDuration(selected.durationMillis)}</Text>
+
+                    {selected.aiSummary ? (
+                      <>
+                        <Text style={styles.detailLabel}>Resumen</Text>
+                        <Text style={styles.detailBlock}>{selected.aiSummary}</Text>
+                      </>
+                    ) : null}
+
+                    <Text style={styles.detailLabel}>Transcripción</Text>
+                    <Text style={styles.detailBlock}>{selected.transcript || 'Sin transcripción.'}</Text>
+                  </>
+                ) : (
+                  <>
+                    <Text style={styles.detailLabel}>Texto extraído</Text>
+                    <Text style={styles.detailBlock}>{selected?.ocrText || '[SIN_TEXTO]'}</Text>
+                  </>
+                )}
+              </ScrollView>
+            </View>
+          </SafeAreaView>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#FFFBEB' },
+  safe: { flex: 1, backgroundColor: '#FFFFFF' },
   scroll: { flex: 1 },
-  content: { paddingHorizontal: 20, paddingTop: 10, paddingBottom: 120 },
-  headerBanner: {
-    backgroundColor: '#D97706',
-    borderRadius: 24,
-    padding: 24,
-    paddingTop: 32,
-    alignItems: 'center',
-    marginBottom: 24,
-    marginTop: 44,
-  },
-  headerIcon: {
-    width: 56,
-    height: 56,
-    borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.2)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 12,
-  },
-  headerTitle: {
-    color: '#FFFFFF',
-    fontSize: 26,
-    fontWeight: '900',
-  },
-  headerSub: {
-    color: 'rgba(255,255,255,0.75)',
-    fontSize: 14,
-    fontWeight: '600',
-    marginTop: 6,
+  content: { paddingHorizontal: 20, paddingTop: 0, paddingBottom: 120 },
+  headerWrap: {
+    paddingTop: 10,
+    marginBottom: 20,
   },
   emptyCard: {
     backgroundColor: '#FFFFFF',
@@ -239,5 +260,78 @@ const styles = StyleSheet.create({
     color: '#64748B',
     fontSize: 13,
     marginTop: 4,
+  },
+  viewHint: {
+    color: '#6366F1',
+    marginTop: 8,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(2,6,23,0.92)',
+  },
+  modalSafe: {
+    flex: 1,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingTop: 12,
+  },
+  modalTitle: {
+    color: '#FFFFFF',
+    fontSize: 22,
+    fontWeight: '900',
+    flex: 1,
+  },
+  closeButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.16)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalCard: {
+    flex: 1,
+    marginTop: 14,
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  modalContent: {
+    padding: 16,
+    paddingBottom: 120,
+  },
+  modalMeta: {
+    color: '#64748B',
+    fontSize: 13,
+    fontWeight: '700',
+    marginBottom: 10,
+  },
+  detailLabel: {
+    color: '#334155',
+    fontSize: 12,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    marginBottom: 6,
+    marginTop: 8,
+  },
+  detailValue: {
+    color: '#0F172A',
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  detailBlock: {
+    color: '#0F172A',
+    fontSize: 15,
+    lineHeight: 24,
+    fontWeight: '500',
   },
 });
