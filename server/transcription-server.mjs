@@ -28,6 +28,8 @@ const ocrFallbackModels = (process.env.OPENROUTER_OCR_FALLBACK_MODELS ?? '')
   .split(',')
   .map((item) => item.trim())
   .filter(Boolean);
+const ffmpegBinaryPath =
+  (typeof ffmpegStatic === 'string' && ffmpegStatic.trim()) || process.env.FFMPEG_PATH || 'ffmpeg';
 
 if (!openRouterKey) {
   console.error('Missing OPENROUTER_API_KEY in environment.');
@@ -574,6 +576,7 @@ app.post('/api/medications/extract', async (req, res) => {
 
 app.listen(port, host, () => {
   console.log(`Transcription API listening on http://${host}:${port}`);
+  console.log(`FFmpeg binary: ${ffmpegBinaryPath}`);
 });
 
 function detectFormat(mimetype = '', fileName = '') {
@@ -640,8 +643,7 @@ async function prepareAudioForProvider(file) {
 
 function transcodeWithFfmpeg(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
-    const ffmpegBinary = ffmpegStatic || 'ffmpeg';
-    const ffmpeg = spawn(ffmpegBinary, [
+    const ffmpeg = spawn(ffmpegBinaryPath, [
       '-y',
       '-i',
       inputPath,
