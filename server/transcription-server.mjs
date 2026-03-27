@@ -2,6 +2,7 @@ import 'dotenv/config';
 import cors from 'cors';
 import express from 'express';
 import multer from 'multer';
+import ffmpegStatic from 'ffmpeg-static';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -639,7 +640,8 @@ async function prepareAudioForProvider(file) {
 
 function transcodeWithFfmpeg(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
-    const ffmpeg = spawn('ffmpeg', [
+    const ffmpegBinary = ffmpegStatic || 'ffmpeg';
+    const ffmpeg = spawn(ffmpegBinary, [
       '-y',
       '-i',
       inputPath,
