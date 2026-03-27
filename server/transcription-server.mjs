@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 
 const app = express();
-const port = Number(process.env.TRANSCRIBE_PORT ?? 4001);
+const port = Number(process.env.PORT ?? process.env.TRANSCRIBE_PORT ?? 4001);
 const host = process.env.TRANSCRIBE_HOST ?? '0.0.0.0';
 const maxFileMb = Number(process.env.TRANSCRIBE_MAX_FILE_MB ?? 5);
 const openRouterKey = process.env.OPENROUTER_API_KEY;
