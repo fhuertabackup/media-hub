@@ -1,8 +1,9 @@
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   Image,
+  Linking,
   Modal,
   Pressable,
   Share,
@@ -13,11 +14,13 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import * as Sharing from 'expo-sharing';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
+import ViewShot from 'react-native-view-shot';
 import { useFocusEffect } from 'expo-router';
 
 import {
@@ -31,6 +34,7 @@ import { generatePhotoGroupTitle, ocrPhoto } from '../../src/lib/photo-ocr-api';
 import {
   lookupFonasaPrices,
   lookupFonasaDetail,
+  FonasaPriceItem,
   FonasaLookupResult,
   FonasaPharmacyDetail,
 } from '../../src/lib/fonasa-price-api';
@@ -48,6 +52,154 @@ interface PhotoGroup {
   items: PhotoItem[];
 }
 
+interface GroupPriceLookupState {
+  loading: boolean;
+  error?: string;
+  results?: FonasaLookupResult[];
+  latitud?: number;
+  longitud?: number;
+}
+
+interface GroupStructuredData {
+  medications: Array<{
+    name: string;
+    dose?: string;
+    frequency?: string;
+    duration?: string;
+    notes?: string;
+  }>;
+  indications: string;
+  doctor: string;
+  patient: string;
+  institution: string;
+  date: string;
+  rawText: string;
+}
+
+type MedicationEntry = GroupStructuredData['medications'][number];
+
+interface MedicationPriceResolution {
+  status: 'matched_exact' | 'matched_name_only' | 'mismatch' | 'no_presentation' | 'not_found';
+  price: number | null;
+  sourceResult?: FonasaLookupResult;
+  sourceItem?: FonasaPriceItem;
+}
+
+function normalizeMatchText(value: string) {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractDoseTokens(value: string) {
+  const normalized = normalizeMatchText(value)
+    .replace(/\bmiligram(?:o|os|a|as)\b/g, 'mg')
+    .replace(/\bgram(?:o|os|a|as)\b/g, 'g')
+    .replace(/\bmicrogram(?:o|os|a|as)\b/g, 'mcg')
+    .replace(/\bmcg\b/g, 'mcg')
+    .replace(/\bug\b/g, 'mcg')
+    .replace(/\bmililit(?:ro|ros)\b/g, 'ml')
+    .replace(/\bm[l1]\b/g, 'ml')
+    .replace(/\bunidades? internacionales?\b/g, 'ui')
+    .replace(/\biu\b/g, 'ui');
+
+  const out: string[] = [];
+  const re = /(\d+(?:[.,]\d+)?)\s*(mg|g|mcg|ug|ml|ui|iu)/gi;
+  let match = re.exec(normalized);
+  while (match) {
+    const number = match[1].replace(',', '.');
+    const unitRaw = match[2].toLowerCase();
+    const unit = unitRaw === 'ug' || unitRaw === 'iu' ? (unitRaw === 'ug' ? 'mcg' : 'ui') : unitRaw;
+    out.push(`${number}${unit}`);
+    match = re.exec(normalized);
+  }
+  return [...new Set(out)];
+}
+
+function medicationMatchesQuery(med: MedicationEntry, result: FonasaLookupResult) {
+  const medName = normalizeMatchText(med.name);
+  const query = normalizeMatchText(result.query);
+  return medName.includes(query) || query.includes(medName);
+}
+
+function resolveMedicationPrice(
+  med: MedicationEntry,
+  lookup?: GroupPriceLookupState
+): MedicationPriceResolution {
+  const relevantResults = (lookup?.results ?? []).filter((result) => medicationMatchesQuery(med, result));
+  if (relevantResults.length === 0) {
+    return { status: 'not_found', price: null };
+  }
+
+  const expectedTokens = extractDoseTokens(`${med.name} ${med.dose ?? ''}`);
+  if (expectedTokens.length === 0) {
+    const pricedByResult = relevantResults
+      .map((result) => {
+        const pricedItems = result.items.filter((item) => Number.isFinite(item.ofertaFonasa));
+        if (pricedItems.length === 0) return null;
+        const bestItem = pricedItems.reduce((acc, curr) =>
+          (curr.ofertaFonasa as number) < (acc.ofertaFonasa as number) ? curr : acc
+        );
+        return { result, item: bestItem };
+      })
+      .filter(Boolean) as Array<{ result: FonasaLookupResult; item: FonasaPriceItem }>;
+
+    if (pricedByResult.length === 0) {
+      return { status: 'no_presentation', price: null };
+    }
+
+    const best = pricedByResult.reduce((acc, curr) =>
+      (curr.item.ofertaFonasa as number) < (acc.item.ofertaFonasa as number) ? curr : acc
+    );
+
+    return {
+      status: 'matched_name_only',
+      price: best.item.ofertaFonasa as number,
+      sourceResult: best.result,
+      sourceItem: best.item,
+    };
+  }
+
+  const candidates = relevantResults.flatMap((result) =>
+    result.items
+      .filter((item) => Number.isFinite(item.ofertaFonasa))
+      .map((item) => ({ item, result }))
+  );
+
+  const strictMatches = candidates.filter(({ item }) => {
+    const candidateTokens = extractDoseTokens(
+      `${item.principioActivo1 ?? ''} ${item.presentacion ?? ''} ${item.formaFarmaceutica ?? ''}`
+    );
+    return expectedTokens.every((token) => candidateTokens.includes(token));
+  });
+
+  if (strictMatches.length === 0) {
+    return { status: 'mismatch', price: null };
+  }
+
+  const best = strictMatches.reduce((acc, curr) =>
+    (curr.item.ofertaFonasa as number) < (acc.item.ofertaFonasa as number) ? curr : acc
+  );
+
+  return {
+    status: 'matched_exact',
+    price: best.item.ofertaFonasa as number,
+    sourceResult: best.result,
+    sourceItem: best.item,
+  };
+}
+
+function computeMedicationTotalApprox(medications: MedicationEntry[], lookup?: GroupPriceLookupState) {
+  return medications.reduce((acc, med) => {
+    const resolved = resolveMedicationPrice(med, lookup);
+    return resolved.status === 'matched_exact' && resolved.price != null ? acc + resolved.price : acc;
+  }, 0);
+}
+
 export default function BibliotecaScreen() {
   const [photos, setPhotos] = useState<PhotoItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -60,23 +212,14 @@ export default function BibliotecaScreen() {
 
   const [previewGroup, setPreviewGroup] = useState<PhotoGroup | null>(null);
   const [previewPhoto, setPreviewPhoto] = useState<PhotoItem | null>(null);
+  const [galleryGroup, setGalleryGroup] = useState<PhotoGroup | null>(null);
+  const [shareCaptureGroup, setShareCaptureGroup] = useState<PhotoGroup | null>(null);
 
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const [retryingGroupIds, setRetryingGroupIds] = useState<Record<string, boolean>>({});
   const [rawOcrExpandedByGroup, setRawOcrExpandedByGroup] = useState<Record<string, boolean>>({});
-  const [priceLookupByGroup, setPriceLookupByGroup] = useState<
-    Record<
-      string,
-      {
-        loading: boolean;
-        error?: string;
-        results?: FonasaLookupResult[];
-        latitud?: number;
-        longitud?: number;
-      }
-    >
-  >({});
+  const [priceLookupByGroup, setPriceLookupByGroup] = useState<Record<string, GroupPriceLookupState>>({});
   const [priceDetailModal, setPriceDetailModal] = useState<{
     open: boolean;
     loading: boolean;
@@ -87,6 +230,9 @@ export default function BibliotecaScreen() {
 
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView | null>(null);
+  const autoPriceLookupTriedRef = useRef<Record<string, boolean>>({});
+  const shareCaptureViewRef = useRef<ViewShot | null>(null);
+  const shareCaptureResolverRef = useRef<((uri: string | null) => void) | null>(null);
 
   const loadPhotos = useCallback(async () => {
     try {
@@ -131,6 +277,107 @@ export default function BibliotecaScreen() {
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }, [photos]);
 
+  const getCachedPriceLookupForGroup = useCallback((group: PhotoGroup): GroupPriceLookupState | undefined => {
+    const cache = group.items.find((item) => item.priceLookupCache)?.priceLookupCache;
+    if (!cache) return undefined;
+    return {
+      loading: false,
+      error: '',
+      results: cache.results,
+      latitud: cache.latitud,
+      longitud: cache.longitud,
+    };
+  }, []);
+
+  const getEffectivePriceLookup = useCallback(
+    (group: PhotoGroup): GroupPriceLookupState | undefined =>
+      priceLookupByGroup[group.groupId] ?? getCachedPriceLookupForGroup(group),
+    [getCachedPriceLookupForGroup, priceLookupByGroup]
+  );
+
+  const persistPriceLookupForGroup = useCallback(
+    async (groupId: string, lookup: GroupPriceLookupState) => {
+      if (!lookup.results || lookup.results.length === 0 || lookup.latitud == null || lookup.longitud == null) {
+        return;
+      }
+
+      const all = await getAllMedia();
+      const groupItems = all.filter(
+        (item): item is PhotoItem => item.type === 'photo' && (item.photoGroupId || item.id) === groupId
+      );
+
+      for (const item of groupItems) {
+        await updateMediaItem(item.id, {
+          priceLookupCache: {
+            provider: 'fonasa',
+            updatedAt: new Date().toISOString(),
+            latitud: lookup.latitud,
+            longitud: lookup.longitud,
+            results: lookup.results,
+          },
+        });
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (groupedPhotos.length === 0) return;
+
+    setPriceLookupByGroup((prev) => {
+      const next = { ...prev };
+      let changed = false;
+
+      for (const group of groupedPhotos) {
+        if (next[group.groupId]) continue;
+        const cached = getCachedPriceLookupForGroup(group);
+        if (!cached) continue;
+        next[group.groupId] = cached;
+        changed = true;
+      }
+
+      return changed ? next : prev;
+    });
+  }, [getCachedPriceLookupForGroup, groupedPhotos]);
+
+  useEffect(() => {
+    if (!shareCaptureGroup) return;
+    let active = true;
+
+    const runCapture = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      let uri: string | null = null;
+      try {
+        uri = (await shareCaptureViewRef.current?.capture?.()) ?? null;
+      } catch (error) {
+        console.error(error);
+      } finally {
+        if (!active) return;
+        shareCaptureResolverRef.current?.(uri);
+        shareCaptureResolverRef.current = null;
+        setShareCaptureGroup(null);
+      }
+    };
+
+    runCapture();
+    return () => {
+      active = false;
+    };
+  }, [shareCaptureGroup]);
+
+  const captureRecipeScreenshot = useCallback(
+    async (group: PhotoGroup) =>
+      new Promise<string | null>((resolve) => {
+        if (shareCaptureResolverRef.current) {
+          shareCaptureResolverRef.current(null);
+          shareCaptureResolverRef.current = null;
+        }
+        shareCaptureResolverRef.current = resolve;
+        setShareCaptureGroup(group);
+      }),
+    []
+  );
+
   const getGroupTitle = (group: PhotoGroup) => {
     const persisted = group.items.find((item) => item.photoGroupTitle?.trim())?.photoGroupTitle?.trim();
     if (persisted) return persisted;
@@ -170,7 +417,7 @@ export default function BibliotecaScreen() {
     return lines.slice(0, 3).join('\n');
   };
 
-  const getGroupStructuredData = (group: PhotoGroup) => {
+  const getGroupStructuredData = (group: PhotoGroup): GroupStructuredData => {
     const medications = group.items.flatMap((item) => item.ocrParsed?.medications ?? []);
 
     const firstWithMeta = group.items.find(
@@ -441,6 +688,11 @@ export default function BibliotecaScreen() {
               const items = prev.items.filter((item) => item.id !== photo.id);
               return items.length ? { ...prev, items } : null;
             });
+            setGalleryGroup((prev) => {
+              if (!prev) return prev;
+              const items = prev.items.filter((item) => item.id !== photo.id);
+              return items.length ? { ...prev, items } : null;
+            });
           } catch (error) {
             console.error(error);
             Alert.alert('Error', 'No se pudo eliminar la foto.');
@@ -463,6 +715,7 @@ export default function BibliotecaScreen() {
             }
             await loadPhotos();
             setPreviewGroup(null);
+            setGalleryGroup(null);
           } catch (error) {
             console.error(error);
             Alert.alert('Error', 'No se pudo eliminar el evento.');
@@ -507,6 +760,15 @@ export default function BibliotecaScreen() {
 
   const shareGroupRecipe = async (group: PhotoGroup) => {
     try {
+      const screenshotUri = await captureRecipeScreenshot(group);
+      if (screenshotUri && (await Sharing.isAvailableAsync())) {
+        await Sharing.shareAsync(screenshotUri, {
+          dialogTitle: getGroupTitle(group),
+          mimeType: 'image/png',
+        });
+        return;
+      }
+
       const data = getGroupStructuredData(group);
       const medText =
         data.medications.length > 0
@@ -560,21 +822,32 @@ export default function BibliotecaScreen() {
     return [...new Set(aiNames)];
   };
 
-  const lookupGroupPrices = async (group: PhotoGroup) => {
+  const lookupGroupPrices = async (group: PhotoGroup, options?: { silent?: boolean }) => {
+    const silent = options?.silent === true;
     const queries = await getPriceQueriesForGroup(group);
     if (queries.length === 0) {
-      Alert.alert('Sin medicamentos', 'No se detectaron medicamentos para consultar precios.');
+      if (!silent) {
+        Alert.alert('Sin medicamentos', 'No se detectaron medicamentos para consultar precios.');
+      }
       return;
     }
 
     try {
+      const current = getEffectivePriceLookup(group);
       setPriceLookupByGroup((prev) => ({
         ...prev,
-        [group.groupId]: { loading: true, error: '', results: prev[group.groupId]?.results },
+        [group.groupId]: { loading: true, error: '', results: current?.results },
       }));
 
       const permission = await Location.requestForegroundPermissionsAsync();
       if (!permission.granted) {
+        if (silent) {
+          setPriceLookupByGroup((prev) => ({
+            ...prev,
+            [group.groupId]: { ...current, loading: false, error: '' },
+          }));
+          return;
+        }
         throw new Error('Debes permitir ubicación para consultar precios cercanos.');
       }
 
@@ -588,34 +861,81 @@ export default function BibliotecaScreen() {
         medications: queries,
       });
 
+      const nextLookup: GroupPriceLookupState = {
+        loading: false,
+        error: '',
+        results: result.results,
+        latitud: position.coords.latitude,
+        longitud: position.coords.longitude,
+      };
+
+      await persistPriceLookupForGroup(group.groupId, nextLookup);
+
       setPriceLookupByGroup((prev) => ({
         ...prev,
-        [group.groupId]: {
-          loading: false,
-          error: '',
-          results: result.results,
-          latitud: position.coords.latitude,
-          longitud: position.coords.longitude,
-        },
+        [group.groupId]: nextLookup,
       }));
     } catch (error) {
       console.error(error);
+      if (silent) {
+        const current = getEffectivePriceLookup(group);
+        setPriceLookupByGroup((prev) => ({
+          ...prev,
+          [group.groupId]: {
+            loading: false,
+            error: '',
+            results: current?.results ?? [],
+            latitud: current?.latitud,
+            longitud: current?.longitud,
+          },
+        }));
+        return;
+      }
       setPriceLookupByGroup((prev) => ({
         ...prev,
         [group.groupId]: {
           loading: false,
           error: error instanceof Error ? error.message : 'No se pudieron consultar precios.',
-          results: [],
+          results: getEffectivePriceLookup(group)?.results ?? [],
+          latitud: getEffectivePriceLookup(group)?.latitud,
+          longitud: getEffectivePriceLookup(group)?.longitud,
         },
       }));
     }
   };
 
-  const openPriceDetail = async (group: PhotoGroup, result: FonasaLookupResult) => {
-    const context = priceLookupByGroup[group.groupId];
+  useEffect(() => {
+    groupedPhotos.forEach((group) => {
+      if (autoPriceLookupTriedRef.current[group.groupId]) return;
+      if (isGroupProcessing(group)) return;
+
+      const hasTranscription = group.items.some((item) => {
+        const text = (item.ocrParsed?.rawText ?? item.ocrText ?? '').trim();
+        return item.ocrStatus === 'done' && text.length > 0 && text !== '[SIN_TEXTO]';
+      });
+      if (!hasTranscription) return;
+
+      const effective = getEffectivePriceLookup(group);
+      const hasCachedPrices = Boolean(effective?.results && effective.results.length > 0);
+      if (hasCachedPrices) {
+        autoPriceLookupTriedRef.current[group.groupId] = true;
+        return;
+      }
+
+      autoPriceLookupTriedRef.current[group.groupId] = true;
+      void lookupGroupPrices(group, { silent: true });
+    });
+  }, [getEffectivePriceLookup, groupedPhotos, lookupGroupPrices]);
+
+  const openPriceDetail = async (
+    group: PhotoGroup,
+    result: FonasaLookupResult,
+    selectedItem?: FonasaPriceItem
+  ) => {
+    const context = getEffectivePriceLookup(group);
     const latitud = context?.latitud;
     const longitud = context?.longitud;
-    const firstItem = result.items?.[0];
+    const firstItem = selectedItem ?? result.items?.[0];
 
     if (!latitud || !longitud || !firstItem?.registroSanitario || !firstItem.presentacion || !firstItem.laboratorio) {
       Alert.alert('Faltan datos', 'Primero vuelve a consultar precios para obtener contexto completo.');
@@ -659,6 +979,27 @@ export default function BibliotecaScreen() {
     }
   };
 
+  const openPharmacyRoute = async (pharmacy: FonasaPharmacyDetail) => {
+    if (pharmacy.latitud == null || pharmacy.longitud == null) {
+      Alert.alert('Sin coordenadas', 'Esta farmacia no tiene coordenadas disponibles.');
+      return;
+    }
+
+    try {
+      const destination = `${pharmacy.latitud},${pharmacy.longitud}`;
+      const url = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(destination)}&travelmode=driving`;
+      const canOpen = await Linking.canOpenURL(url);
+      if (!canOpen) {
+        Alert.alert('No disponible', 'No se pudo abrir la app de mapas.');
+        return;
+      }
+      await Linking.openURL(url);
+    } catch (error) {
+      console.error(error);
+      Alert.alert('Error', 'No se pudo abrir la ruta en mapas.');
+    }
+  };
+
   return (
     <SafeAreaView style={styles.safe}>
       <SoftScreenGradient color="#34D399" />
@@ -695,61 +1036,66 @@ export default function BibliotecaScreen() {
             </Text>
           </View>
         ) : (
-          groupedPhotos.map((group) => (
-            <View key={group.groupId} style={styles.groupCard}>
-              <View style={styles.groupHeader}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.groupTitle} numberOfLines={1}>
-                    {getGroupTitle(group)}
-                  </Text>
-                  <Text style={styles.groupMeta}>{formatDate(group.createdAt)}</Text>
+          groupedPhotos.map((group) => {
+            return (
+              <View key={group.groupId} style={styles.groupCard}>
+                <View style={styles.groupHeader}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.groupTitle} numberOfLines={1}>
+                      {getGroupTitle(group)}
+                    </Text>
+                    <Text style={styles.groupMeta}>{formatDate(group.createdAt)}</Text>
+                  </View>
+
+                  <Pressable style={styles.iconButton} onPress={() => openEditTitle(group)}>
+                    <Ionicons name="create-outline" size={18} color="#0F172A" />
+                  </Pressable>
+                  <Pressable style={styles.iconButton} onPress={() => shareGroupRecipe(group)}>
+                    <Ionicons name="share-outline" size={18} color="#1E3A8A" />
+                  </Pressable>
+                  <Pressable style={styles.iconButtonDanger} onPress={() => confirmDeleteGroup(group)}>
+                    <Ionicons name="trash-outline" size={18} color="#DC2626" />
+                  </Pressable>
                 </View>
 
-                <Pressable style={styles.iconButton} onPress={() => openEditTitle(group)}>
-                  <Ionicons name="create-outline" size={18} color="#0F172A" />
-                </Pressable>
-                <Pressable style={styles.iconButtonDanger} onPress={() => confirmDeleteGroup(group)}>
-                  <Ionicons name="trash-outline" size={18} color="#DC2626" />
-                </Pressable>
-              </View>
+                <View style={styles.groupBody}>
+                  <Pressable style={styles.photoCountCard} onPress={() => setPreviewGroup(group)}>
+                    <Ionicons name="images-outline" size={28} color="#1E3A8A" />
+                    <Text style={styles.photoCountNumber}>{group.items.length}</Text>
+                    <Text style={styles.photoCountLabel}>fotos</Text>
+                  </Pressable>
 
-              <View style={styles.groupBody}>
-                <Pressable style={styles.photoCountCard} onPress={() => setPreviewGroup(group)}>
-                  <Ionicons name="images-outline" size={28} color="#1E3A8A" />
-                  <Text style={styles.photoCountNumber}>{group.items.length}</Text>
-                  <Text style={styles.photoCountLabel}>fotos</Text>
-                </Pressable>
-
-                <Pressable style={styles.summaryCard} onPress={() => setPreviewGroup(group)}>
-                  <View style={styles.summaryTopRow}>
-                    <Text style={styles.summaryLabel}>Texto extraído</Text>
-                    {canRetryGroupOcr(group) ? (
-                      <Pressable
-                        style={[styles.retryButton, retryingGroupIds[group.groupId] && { opacity: 0.6 }]}
-                        onPress={() => retryGroupOcr(group)}
-                        disabled={Boolean(retryingGroupIds[group.groupId])}
-                      >
-                        {retryingGroupIds[group.groupId] ? (
-                          <ActivityIndicator size="small" color="#1E3A8A" />
-                        ) : (
-                          <Ionicons name="refresh" size={14} color="#1E3A8A" />
-                        )}
-                      </Pressable>
-                    ) : null}
-                  </View>
-                  {isGroupProcessing(group) ? (
-                    <View style={styles.processingRow}>
-                      <ActivityIndicator size="small" color="#1E3A8A" />
-                      <Text style={styles.processingText}>Procesando receta...</Text>
+                  <Pressable style={styles.summaryCard} onPress={() => setPreviewGroup(group)}>
+                    <View style={styles.summaryTopRow}>
+                      <Text style={styles.summaryLabel}>Texto extraído</Text>
+                      {canRetryGroupOcr(group) ? (
+                        <Pressable
+                          style={[styles.retryButton, retryingGroupIds[group.groupId] && { opacity: 0.6 }]}
+                          onPress={() => retryGroupOcr(group)}
+                          disabled={Boolean(retryingGroupIds[group.groupId])}
+                        >
+                          {retryingGroupIds[group.groupId] ? (
+                            <ActivityIndicator size="small" color="#1E3A8A" />
+                          ) : (
+                            <Ionicons name="refresh" size={14} color="#1E3A8A" />
+                          )}
+                        </Pressable>
+                      ) : null}
                     </View>
-                  ) : null}
-                  <Text style={styles.summaryText} numberOfLines={4}>
-                    {getGroupSummary(group)}
-                  </Text>
-                </Pressable>
+                    {isGroupProcessing(group) ? (
+                      <View style={styles.processingRow}>
+                        <ActivityIndicator size="small" color="#1E3A8A" />
+                        <Text style={styles.processingText}>Procesando receta...</Text>
+                      </View>
+                    ) : null}
+                    <Text style={styles.summaryText} numberOfLines={4}>
+                      {getGroupSummary(group)}
+                    </Text>
+                  </Pressable>
+                </View>
               </View>
-            </View>
-          ))
+            );
+          })
         )}
       </ScrollView>
 
@@ -829,31 +1175,43 @@ export default function BibliotecaScreen() {
               <Text style={styles.previewTitle} numberOfLines={1}>
                 {previewGroup ? getGroupTitle(previewGroup) : ''}
               </Text>
-              <Pressable style={styles.previewCloseBtn} onPress={() => setPreviewGroup(null)}>
+              <Pressable
+                style={styles.previewCloseBtn}
+                onPress={() => {
+                  setPreviewGroup(null);
+                  setGalleryGroup(null);
+                }}
+              >
                 <Ionicons name="close" size={26} color="#FFFFFF" />
               </Pressable>
             </View>
 
             <View style={styles.groupModalCard}>
-              <ScrollView
-                horizontal
-                style={styles.groupModalPhotosScroll}
-                contentContainerStyle={styles.groupModalPhotos}
-              >
-                {previewGroup?.items.map((photo) => (
-                  <View key={photo.id} style={styles.groupModalPhotoItem}>
-                    <Pressable onPress={() => setPreviewPhoto(photo)}>
-                      <Image source={{ uri: photo.uri }} style={styles.groupModalPhoto} />
-                    </Pressable>
-                    <Pressable
-                      style={styles.groupModalDeleteBtn}
-                      onPress={() => confirmDeletePhoto(photo)}
-                    >
-                      <Ionicons name="trash-outline" size={15} color="#DC2626" />
-                    </Pressable>
-                  </View>
-                ))}
-              </ScrollView>
+              {previewGroup ? (
+                <View style={styles.groupModalPhotosHeader}>
+                  <Pressable style={styles.detailPhotoStackButton} onPress={() => setGalleryGroup(previewGroup)}>
+                    <Ionicons name="images-outline" size={28} color="#1E3A8A" />
+                    <Text style={styles.photoCountNumber}>{previewGroup.items.length}</Text>
+                    <Text style={styles.photoCountLabel}>fotos</Text>
+                  </Pressable>
+
+                  {(() => {
+                    const priceLookup = getEffectivePriceLookup(previewGroup);
+                    const totalApprox = computeMedicationTotalApprox(
+                      getGroupStructuredData(previewGroup).medications,
+                      priceLookup
+                    );
+                    return (
+                      <View style={styles.totalApproxCard}>
+                        <Text style={styles.totalApproxLabel}>TOTAL APROX</Text>
+                        <Text style={styles.totalApproxValue}>
+                          {totalApprox > 0 ? `$${Math.round(totalApprox)}` : 'S/P'}
+                        </Text>
+                      </View>
+                    );
+                  })()}
+                </View>
+              ) : null}
 
               <View style={styles.groupModalTextWrap}>
                 <View style={styles.modalTextHeader}>
@@ -864,7 +1222,7 @@ export default function BibliotecaScreen() {
                         style={styles.shareRecipeButton}
                         onPress={() => lookupGroupPrices(previewGroup)}
                       >
-                        {priceLookupByGroup[previewGroup.groupId]?.loading ? (
+                        {getEffectivePriceLookup(previewGroup)?.loading ? (
                           <ActivityIndicator size="small" color="#1E3A8A" />
                         ) : (
                           <Ionicons name="cash-outline" size={14} color="#1E3A8A" />
@@ -884,7 +1242,7 @@ export default function BibliotecaScreen() {
                   {previewGroup ? (
                     (() => {
                       const data = getGroupStructuredData(previewGroup);
-                      const priceLookup = priceLookupByGroup[previewGroup.groupId];
+                      const priceLookup = getEffectivePriceLookup(previewGroup);
                       const showMedicationSection =
                         data.medications.length > 0 ||
                         Boolean(priceLookup?.loading || priceLookup?.error) ||
@@ -902,7 +1260,21 @@ export default function BibliotecaScreen() {
                                   <Text style={styles.sectionTitle}>Medicamentos y precios</Text>
                                   {data.medications.length > 0 ? (
                                     data.medications.map((med, index) => (
-                                      <View key={`${med.name}-${index}`} style={styles.medCard}>
+                                      <View
+                                        key={`${med.name}-${index}`}
+                                        style={[
+                                          styles.medCard,
+                                          (() => {
+                                            const resolved = resolveMedicationPrice(med, priceLookup);
+                                            const lookedUp = Boolean(priceLookup?.results);
+                                            return lookedUp &&
+                                              resolved.status !== 'matched_exact' &&
+                                              resolved.status !== 'matched_name_only'
+                                              ? styles.medCardMissing
+                                              : null;
+                                          })(),
+                                        ]}
+                                      >
                                         <Text style={styles.medName}>{med.name}</Text>
                                         {[med.dose, med.frequency, med.duration, med.notes]
                                           .filter(Boolean)
@@ -915,29 +1287,53 @@ export default function BibliotecaScreen() {
                                         ) : null}
 
                                         {(() => {
-                                          const medName = med.name.trim().toLowerCase();
-                                          const matched = priceLookup?.results?.find((result) => {
-                                            const query = result.query.trim().toLowerCase();
-                                            return query.includes(medName) || medName.includes(query);
-                                          });
-                                          const hasPrice = Boolean(
-                                            matched && matched.bestPrice != null && matched.itemCount > 0
-                                          );
+                                          const resolved = resolveMedicationPrice(med, priceLookup);
+                                          const hasPrice =
+                                            (resolved.status === 'matched_exact' ||
+                                              resolved.status === 'matched_name_only') &&
+                                            resolved.price != null;
+                                          const sourceResult = resolved.sourceResult;
+                                          const lookedUp = Boolean(priceLookup?.results);
                                           return (
                                             <View style={styles.medPriceRow}>
                                               <View style={{ flex: 1 }}>
                                                 <Text style={styles.medPriceLabel}>Precio Fonasa</Text>
-                                                <Text style={styles.medPriceValue}>
-                                                  {hasPrice && matched
-                                                    ? `$${Math.round(matched.bestPrice as number)}`
-                                                    : 'S/P'}
+                                                <Text
+                                                  style={[
+                                                    styles.medPriceValue,
+                                                    lookedUp && !hasPrice ? styles.medPriceValueMissing : null,
+                                                  ]}
+                                                >
+                                                  {hasPrice ? `$${Math.round(resolved.price as number)}` : 'S/P'}
                                                 </Text>
+                                                {lookedUp && !hasPrice ? (
+                                                  <View style={styles.medMissingRow}>
+                                                    <Ionicons name="alert-circle-outline" size={12} color="#B91C1C" />
+                                                    <Text style={styles.medMissingText}>
+                                                      {resolved.status === 'mismatch'
+                                                        ? 'No coincide presentación'
+                                                        : resolved.status === 'no_presentation'
+                                                          ? 'Sin dosis/presentación legible'
+                                                          : 'No encontrado'}
+                                                    </Text>
+                                                  </View>
+                                                ) : null}
+                                                {lookedUp && resolved.status === 'matched_name_only' ? (
+                                                  <View style={styles.medWarningRow}>
+                                                    <Ionicons name="alert-circle-outline" size={12} color="#B45309" />
+                                                    <Text style={styles.medWarningText}>
+                                                      Coincidencia por nombre (precio referencial)
+                                                    </Text>
+                                                  </View>
+                                                ) : null}
                                               </View>
 
-                                              {hasPrice && matched ? (
+                                              {hasPrice && sourceResult ? (
                                                 <Pressable
                                                   style={styles.medActionButton}
-                                                  onPress={() => openPriceDetail(previewGroup, matched)}
+                                                  onPress={() =>
+                                                    openPriceDetail(previewGroup, sourceResult, resolved.sourceItem)
+                                                  }
                                                 >
                                                   <Text style={styles.medActionButtonText}>Ver detalle</Text>
                                                   <Ionicons
@@ -1055,6 +1451,40 @@ export default function BibliotecaScreen() {
         </View>
       </Modal>
 
+      <Modal visible={galleryGroup !== null} animationType="slide" transparent>
+        <View style={styles.previewBackdrop}>
+          <SafeAreaView style={styles.previewSafe}>
+            <View style={styles.previewTopRow}>
+              <Text style={styles.previewTitle} numberOfLines={1}>
+                {galleryGroup ? `Fotos (${galleryGroup.items.length})` : ''}
+              </Text>
+              <Pressable style={styles.previewCloseBtn} onPress={() => setGalleryGroup(null)}>
+                <Ionicons name="close" size={26} color="#FFFFFF" />
+              </Pressable>
+            </View>
+
+            <View style={styles.groupModalCard}>
+              <ScrollView
+                horizontal
+                style={styles.groupModalPhotosScroll}
+                contentContainerStyle={styles.groupModalPhotos}
+              >
+                {galleryGroup?.items.map((photo) => (
+                  <View key={photo.id} style={styles.groupModalPhotoItem}>
+                    <Pressable onPress={() => setPreviewPhoto(photo)}>
+                      <Image source={{ uri: photo.uri }} style={styles.groupModalPhoto} />
+                    </Pressable>
+                    <Pressable style={styles.groupModalDeleteBtn} onPress={() => confirmDeletePhoto(photo)}>
+                      <Ionicons name="trash-outline" size={15} color="#DC2626" />
+                    </Pressable>
+                  </View>
+                ))}
+              </ScrollView>
+            </View>
+          </SafeAreaView>
+        </View>
+      </Modal>
+
       <Modal visible={previewPhoto !== null} animationType="fade" transparent>
         <View style={styles.previewBackdrop}>
           <SafeAreaView style={styles.previewSafe}>
@@ -1123,6 +1553,17 @@ export default function BibliotecaScreen() {
                         Fonasa: {item.ofertaFonasa != null ? `$${Math.round(item.ofertaFonasa)}` : 'N/D'} ·
                         Normal: {item.precioNormal != null ? ` $${Math.round(item.precioNormal)}` : ' N/D'}
                       </Text>
+                      <Pressable
+                        style={[
+                          styles.routeButton,
+                          (item.latitud == null || item.longitud == null) && { opacity: 0.5 },
+                        ]}
+                        onPress={() => openPharmacyRoute(item)}
+                        disabled={item.latitud == null || item.longitud == null}
+                      >
+                        <Ionicons name="navigate-outline" size={14} color="#1E3A8A" />
+                        <Text style={styles.routeButtonText}>Cómo llegar</Text>
+                      </Pressable>
                     </View>
                   ))
                 )}
@@ -1154,7 +1595,81 @@ export default function BibliotecaScreen() {
           </View>
         </View>
       </Modal>
+
+      {shareCaptureGroup ? (
+        <View pointerEvents="none" style={styles.captureStage}>
+          <ViewShot
+            ref={shareCaptureViewRef}
+            options={{ format: 'png', quality: 1, result: 'tmpfile', fileName: `receta-${shareCaptureGroup.groupId}` }}
+          >
+            <RecipeShareCaptureCard
+              title={getGroupTitle(shareCaptureGroup)}
+              createdAt={shareCaptureGroup.createdAt}
+              data={getGroupStructuredData(shareCaptureGroup)}
+              priceLookup={getEffectivePriceLookup(shareCaptureGroup)}
+            />
+          </ViewShot>
+        </View>
+      ) : null}
     </SafeAreaView>
+  );
+}
+
+function RecipeShareCaptureCard({
+  title,
+  createdAt,
+  data,
+  priceLookup,
+}: {
+  title: string;
+  createdAt: string;
+  data: GroupStructuredData;
+  priceLookup?: GroupPriceLookupState;
+}) {
+  const totalApprox = computeMedicationTotalApprox(data.medications, priceLookup);
+
+  return (
+    <View style={styles.captureCard}>
+      <Text style={styles.captureTitle}>{title}</Text>
+      <Text style={styles.captureMeta}>Fecha: {formatDate(createdAt)}</Text>
+      <Text style={styles.captureMeta}>Paciente: {data.patient || 'No identificado'}</Text>
+      <Text style={styles.captureMeta}>Profesional: {data.doctor || 'No detectado'}</Text>
+      <Text style={styles.captureMeta}>Centro: {data.institution || 'No detectado'}</Text>
+
+      <View style={styles.captureTotalCardFloating}>
+        <Text style={styles.captureTotalLabel}>TOTAL APROX</Text>
+        <Text style={styles.captureTotalValue}>{totalApprox > 0 ? `$${Math.round(totalApprox)}` : 'S/P'}</Text>
+      </View>
+
+      <View style={styles.captureSection}>
+        <Text style={styles.captureSectionTitle}>Medicamentos y precios</Text>
+        {data.medications.length > 0 ? (
+          data.medications.slice(0, 12).map((med, index) => {
+            const resolved = resolveMedicationPrice(med, priceLookup);
+            const hasPrice =
+              (resolved.status === 'matched_exact' || resolved.status === 'matched_name_only') &&
+              resolved.price != null;
+            const detail = [med.dose, med.frequency, med.duration].filter(Boolean).join(' · ');
+            return (
+              <View key={`${med.name}-${index}`} style={styles.captureMedRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.captureMedName}>{med.name}</Text>
+                  {detail ? <Text style={styles.captureMedDetail}>{detail}</Text> : null}
+                  {resolved.status === 'matched_name_only' ? (
+                    <Text style={styles.captureMedWarn}>Precio referencial por nombre</Text>
+                  ) : null}
+                </View>
+                <Text style={[styles.captureMedPrice, !hasPrice ? styles.captureMedPriceMissing : null]}>
+                  {hasPrice ? `$${Math.round(resolved.price as number)}` : 'S/P'}
+                </Text>
+              </View>
+            );
+          })
+        ) : (
+          <Text style={styles.captureMedDetail}>Sin medicamentos detectados</Text>
+        )}
+      </View>
+    </View>
   );
 }
 
@@ -1255,15 +1770,66 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     gap: 2,
   },
+  photoStackWrap: {
+    width: 92,
+    height: 56,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 2,
+  },
+  photoStackImage: {
+    position: 'absolute',
+    width: 52,
+    height: 52,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#93C5FD',
+    left: 18,
+    top: 2,
+    backgroundColor: '#DBEAFE',
+  },
+  photoStackImageMiddle: {
+    left: 26,
+    top: 0,
+    zIndex: 2,
+  },
+  photoStackImageTop: {
+    left: 34,
+    top: 4,
+    zIndex: 3,
+  },
   photoCountNumber: {
     color: '#1E3A8A',
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '900',
   },
   photoCountLabel: {
     color: '#1E3A8A',
     fontSize: 12,
     fontWeight: '800',
+  },
+  totalApproxCard: {
+    flex: 1,
+    height: 92,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#F97316',
+    borderWidth: 1,
+    borderColor: '#EA580C',
+    justifyContent: 'center',
+    alignItems: 'flex-start',
+  },
+  totalApproxLabel: {
+    color: '#FFEDD5',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  totalApproxValue: {
+    color: '#FFFFFF',
+    fontSize: 20,
+    fontWeight: '900',
+    marginTop: 1,
   },
   summaryCard: {
     flex: 1,
@@ -1472,6 +2038,26 @@ const styles = StyleSheet.create({
     maxHeight: 148,
     flexGrow: 0,
   },
+  groupModalPhotosHeader: {
+    marginHorizontal: 12,
+    marginTop: 12,
+    marginBottom: 2,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  detailPhotoStackButton: {
+    width: 92,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+    paddingVertical: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    backgroundColor: '#EFF6FF',
+  },
   groupModalPhotos: {
     gap: 10,
     paddingHorizontal: 12,
@@ -1555,6 +2141,26 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     textTransform: 'uppercase',
     marginBottom: 6,
+  },
+  sectionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    marginBottom: 6,
+  },
+  sectionTotalText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  sectionTotalPill: {
+    borderRadius: 999,
+    backgroundColor: '#F97316',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderWidth: 1,
+    borderColor: '#EA580C',
   },
   sectionTitleNoMargin: {
     color: '#1E3A8A',
@@ -1672,6 +2278,24 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     marginTop: 6,
   },
+  routeButton: {
+    marginTop: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    backgroundColor: '#EFF6FF',
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  routeButtonText: {
+    color: '#1E3A8A',
+    fontSize: 12,
+    fontWeight: '800',
+  },
   selectorClose: {
     width: 38,
     height: 38,
@@ -1701,6 +2325,189 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 20,
     marginTop: 2,
+  },
+  medCard: {
+    borderWidth: 1,
+    borderColor: '#DBEAFE',
+    borderRadius: 12,
+    backgroundColor: '#F8FAFF',
+    padding: 10,
+    marginBottom: 8,
+  },
+  medCardMissing: {
+    borderColor: '#FECACA',
+    backgroundColor: '#FEF2F2',
+  },
+  medPriceRow: {
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  medPriceLabel: {
+    color: '#64748B',
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+  },
+  medPriceValue: {
+    color: '#047857',
+    fontSize: 18,
+    fontWeight: '900',
+    marginTop: 2,
+  },
+  medPriceValueMissing: {
+    color: '#B91C1C',
+  },
+  medMissingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 2,
+  },
+  medWarningRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 2,
+  },
+  medMissingText: {
+    color: '#B91C1C',
+    fontSize: 12,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  medWarningText: {
+    color: '#B45309',
+    fontSize: 12,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  medActionButton: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    backgroundColor: '#EFF6FF',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  medActionButtonText: {
+    color: '#1E3A8A',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  priceHintText: {
+    color: '#64748B',
+    fontSize: 12,
+    marginTop: 4,
+  },
+  captureStage: {
+    position: 'absolute',
+    left: -5000,
+    top: -5000,
+    width: 390,
+    backgroundColor: '#FFFFFF',
+  },
+  captureCard: {
+    width: 390,
+    backgroundColor: '#F8FAFC',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 14,
+  },
+  captureTitle: {
+    color: '#0F172A',
+    fontSize: 22,
+    fontWeight: '900',
+    marginBottom: 8,
+  },
+  captureMeta: {
+    color: '#475569',
+    fontSize: 13,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  captureTotalCardFloating: {
+    position: 'absolute',
+    right: 14,
+    top: 14,
+    width: 132,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#EA580C',
+    backgroundColor: '#F97316',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    alignItems: 'flex-end',
+  },
+  captureTotalLabel: {
+    color: '#FFEDD5',
+    fontSize: 11,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    textAlign: 'right',
+  },
+  captureTotalValue: {
+    color: '#FFFFFF',
+    fontSize: 26,
+    fontWeight: '900',
+    marginTop: 1,
+    textAlign: 'right',
+  },
+  captureSection: {
+    marginTop: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    backgroundColor: '#FFFFFF',
+    padding: 10,
+  },
+  captureSectionTitle: {
+    color: '#1E3A8A',
+    fontSize: 12,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    marginBottom: 6,
+  },
+  captureMedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    paddingVertical: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  captureMedName: {
+    color: '#0F172A',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  captureMedDetail: {
+    color: '#475569',
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  captureMedPrice: {
+    color: '#047857',
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  captureMedPriceMissing: {
+    color: '#B91C1C',
+  },
+  captureMedWarn: {
+    color: '#B45309',
+    fontSize: 11,
+    fontWeight: '700',
   },
   groupModalText: {
     color: '#0F172A',

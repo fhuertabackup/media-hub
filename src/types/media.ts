@@ -19,6 +19,27 @@ export interface PhotoItem extends BaseMediaItem {
   ocrParsed?: PhotoPrescriptionParsed;
   ocrStatus?: 'pending' | 'done' | 'error';
   ocrError?: string;
+  priceLookupCache?: {
+    provider: 'fonasa';
+    updatedAt: string;
+    latitud: number;
+    longitud: number;
+    results: Array<{
+      query: string;
+      bestPrice: number | null;
+      itemCount: number;
+      items: Array<{
+        id?: number;
+        nombreMedicamento: string;
+        principioActivo1?: string;
+        registroSanitario?: string;
+        presentacion?: string;
+        formaFarmaceutica?: string;
+        laboratorio?: string;
+        ofertaFonasa?: number;
+      }>;
+    }>;
+  };
 }
 
 export interface AudioItem extends BaseMediaItem {

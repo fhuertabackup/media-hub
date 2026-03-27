@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -13,6 +13,8 @@ import {
   View,
 } from 'react-native';
 import * as MailComposer from 'expo-mail-composer';
+import * as Print from 'expo-print';
+import ViewShot from 'react-native-view-shot';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from 'expo-router';
@@ -41,6 +43,9 @@ export default function AjustesScreen() {
   const [selectorVisible, setSelectorVisible] = useState(false);
   const [records, setRecords] = useState<MediaItem[]>([]);
   const [selectedMap, setSelectedMap] = useState<Record<string, boolean>>({});
+  const [capturePhoto, setCapturePhoto] = useState<Extract<MediaItem, { type: 'photo' }> | null>(null);
+  const captureViewRef = useRef<ViewShot | null>(null);
+  const captureResolverRef = useRef<((uri: string | null) => void) | null>(null);
 
   const loadData = useCallback(async () => {
     try {
@@ -110,6 +115,44 @@ export default function AjustesScreen() {
 
   const selectedRecords = records.filter((item) => selectedMap[item.id]);
 
+  useEffect(() => {
+    if (!capturePhoto) return;
+    let active = true;
+
+    const runCapture = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      let uri: string | null = null;
+      try {
+        uri = (await captureViewRef.current?.capture?.()) ?? null;
+      } catch (error) {
+        console.error(error);
+      } finally {
+        if (!active) return;
+        captureResolverRef.current?.(uri);
+        captureResolverRef.current = null;
+        setCapturePhoto(null);
+      }
+    };
+
+    runCapture();
+    return () => {
+      active = false;
+    };
+  }, [capturePhoto]);
+
+  const captureRecipeScreenshot = useCallback(
+    async (photo: Extract<MediaItem, { type: 'photo' }>) =>
+      new Promise<string | null>((resolve) => {
+        if (captureResolverRef.current) {
+          captureResolverRef.current(null);
+          captureResolverRef.current = null;
+        }
+        captureResolverRef.current = resolve;
+        setCapturePhoto(photo);
+      }),
+    []
+  );
+
   const sendSummaryEmail = async () => {
     const to = settings.emergencyEmail.trim();
     if (!to) return;
@@ -154,11 +197,12 @@ export default function AjustesScreen() {
         return;
       }
       const body = buildEmailSummary(settings, selectedRecords);
+      const attachments = await buildEmailAttachments(selectedRecords, captureRecipeScreenshot);
       await MailComposer.composeAsync({
         recipients: [to],
         subject: 'Registros seleccionados con adjuntos - Media Hub',
         body,
-        attachments: selectedRecords.slice(0, 10).map((item) => item.uri),
+        attachments,
       });
       setSelectorVisible(false);
     } catch (error) {
@@ -343,8 +387,128 @@ export default function AjustesScreen() {
           </SafeAreaView>
         </View>
       </Modal>
+
+      {capturePhoto ? (
+        <View pointerEvents="none" style={styles.captureStage}>
+          <ViewShot
+            ref={captureViewRef}
+            options={{ format: 'png', quality: 1, result: 'tmpfile', fileName: `receta-${capturePhoto.id}` }}
+          >
+            <RecipeScreenshotCard photo={capturePhoto} />
+          </ViewShot>
+        </View>
+      ) : null}
     </SafeAreaView>
   );
+}
+
+async function buildEmailAttachments(
+  media: MediaItem[],
+  captureRecipeScreenshot: (photo: Extract<MediaItem, { type: 'photo' }>) => Promise<string | null>
+) {
+  const selected = media.slice(0, 10);
+  const out: string[] = [];
+
+  for (const item of selected) {
+    if (item.type === 'photo') {
+      const screenshotUri = await captureRecipeScreenshot(item);
+      if (screenshotUri) {
+        out.push(screenshotUri);
+        continue;
+      }
+      const pdfUri = await buildRecipeDetailPdfAttachment(item);
+      if (pdfUri) {
+        out.push(pdfUri);
+        continue;
+      }
+    }
+    out.push(item.uri);
+  }
+
+  return out;
+}
+
+async function buildRecipeDetailPdfAttachment(photo: Extract<MediaItem, { type: 'photo' }>) {
+  try {
+    const html = buildRecipeDetailHtml(photo);
+    const file = await Print.printToFileAsync({ html });
+    return file.uri;
+  } catch (error) {
+    console.error(error);
+    return null;
+  }
+}
+
+function buildRecipeDetailHtml(photo: Extract<MediaItem, { type: 'photo' }>) {
+  const meds = photo.ocrParsed?.medications ?? [];
+  const medsHtml =
+    meds.length > 0
+      ? meds
+          .slice(0, 12)
+          .map((med) => {
+            const detail = [med.dose, med.frequency, med.duration, med.notes].filter(Boolean).join(' · ');
+            return `<li><strong>${escapeHtml(med.name)}</strong>${detail ? `: ${escapeHtml(detail)}` : ''}</li>`;
+          })
+          .join('')
+      : '<li>Sin medicamentos detectados</li>';
+
+  const raw = photo.ocrParsed?.rawText?.trim() || photo.ocrText?.trim() || '[SIN_TEXTO]';
+  const patient = photo.ocrParsed?.patientName?.trim() || 'No identificado';
+  const doctor = photo.ocrParsed?.doctorName?.trim() || '';
+  const center = photo.ocrParsed?.institution?.trim() || '';
+  const indications = photo.ocrParsed?.indicationsGeneral?.trim() || 'No detectadas';
+
+  return `
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #0f172a; padding: 18px; }
+          .card { border: 1px solid #e2e8f0; border-radius: 14px; padding: 14px; background: #ffffff; }
+          .title { font-size: 22px; font-weight: 800; margin: 0 0 8px; color: #1e3a8a; }
+          .meta { font-size: 13px; color: #475569; margin: 0 0 4px; }
+          .block { margin-top: 12px; border-top: 1px solid #e2e8f0; padding-top: 10px; }
+          .label { font-size: 12px; font-weight: 700; color: #1e3a8a; text-transform: uppercase; margin: 0 0 5px; }
+          ul { margin: 0; padding-left: 18px; }
+          li { margin-bottom: 5px; line-height: 1.35; }
+          .text { font-size: 13px; line-height: 1.4; color: #0f172a; white-space: pre-wrap; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h1 class="title">${escapeHtml(photo.photoGroupTitle?.trim() || photo.title)}</h1>
+          <p class="meta"><strong>Fecha:</strong> ${escapeHtml(formatDate(photo.createdAt))}</p>
+          <p class="meta"><strong>Paciente:</strong> ${escapeHtml(patient)}</p>
+          ${doctor ? `<p class="meta"><strong>Profesional:</strong> ${escapeHtml(doctor)}</p>` : ''}
+          ${center ? `<p class="meta"><strong>Centro:</strong> ${escapeHtml(center)}</p>` : ''}
+
+          <div class="block">
+            <p class="label">Medicamentos</p>
+            <ul>${medsHtml}</ul>
+          </div>
+
+          <div class="block">
+            <p class="label">Indicaciones</p>
+            <p class="text">${escapeHtml(indications)}</p>
+          </div>
+
+          <div class="block">
+            <p class="label">Texto OCR</p>
+            <p class="text">${escapeHtml(raw)}</p>
+          </div>
+        </div>
+      </body>
+    </html>
+  `;
+}
+
+function escapeHtml(input: string) {
+  return input
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }
 
 function Field({
@@ -377,6 +541,63 @@ function Field({
         keyboardType={keyboardType}
         autoCapitalize={autoCapitalize}
       />
+    </View>
+  );
+}
+
+function RecipeScreenshotCard({ photo }: { photo: Extract<MediaItem, { type: 'photo' }> }) {
+  const meds = photo.ocrParsed?.medications ?? [];
+  const priceResults = photo.priceLookupCache?.results ?? [];
+  const totalApprox = priceResults.reduce((acc, result) => {
+    if (result.bestPrice == null || result.itemCount <= 0) return acc;
+    return acc + result.bestPrice;
+  }, 0);
+
+  return (
+    <View style={styles.captureCard}>
+      <Text style={styles.captureTitle}>{photo.photoGroupTitle?.trim() || photo.title}</Text>
+      <View style={styles.captureHeaderArea}>
+        <View style={styles.captureHeaderInfo}>
+          <Text style={styles.captureMeta}>Fecha: {formatDate(photo.createdAt)}</Text>
+          <Text style={styles.captureMeta}>Paciente: {photo.ocrParsed?.patientName || 'No identificado'}</Text>
+          <Text style={styles.captureMeta}>Profesional: {photo.ocrParsed?.doctorName?.trim() || 'No detectado'}</Text>
+          <Text style={styles.captureMeta}>Centro: {photo.ocrParsed?.institution?.trim() || 'No detectado'}</Text>
+        </View>
+
+        <View style={styles.captureTotalCardFloating}>
+          <Text style={styles.captureTotalLabel}>TOTAL APROX</Text>
+          <Text style={styles.captureTotalValue}>{totalApprox > 0 ? `$${Math.round(totalApprox)}` : 'S/P'}</Text>
+        </View>
+      </View>
+
+      <View style={styles.captureSection}>
+        <Text style={styles.captureSectionTitle}>Medicamentos y precios</Text>
+        {meds.length > 0 ? (
+          meds.slice(0, 10).map((med, index) => {
+            const detail = [med.dose, med.frequency, med.duration].filter(Boolean).join(' · ');
+            const medName = med.name.trim().toLowerCase();
+            const matched = priceResults.find((result) => {
+              const query = result.query.trim().toLowerCase();
+              return query.includes(medName) || medName.includes(query);
+            });
+            const hasPrice = Boolean(matched && matched.bestPrice != null && matched.itemCount > 0);
+            return (
+              <View key={`${med.name}-${index}`} style={styles.captureMedRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.captureText}>{med.name}</Text>
+                  {detail ? <Text style={styles.captureSubText}>{detail}</Text> : null}
+                </View>
+                <Text style={[styles.capturePrice, !hasPrice ? styles.capturePriceMissing : null]}>
+                  {hasPrice && matched ? `$${Math.round(matched.bestPrice as number)}` : 'S/P'}
+                </Text>
+              </View>
+            );
+          })
+        ) : (
+          <Text style={styles.captureText}>Sin medicamentos detectados</Text>
+        )}
+        {priceResults.length === 0 ? <Text style={styles.captureHint}>Precios no consultados</Text> : null}
+      </View>
     </View>
   );
 }
@@ -423,44 +644,13 @@ function buildEmailSummary(settings: AppSettings, media: MediaItem[]) {
   ].join('\n');
 
   const selectedBlock = selected.length
-    ? selected
-        .map((item) => {
-          if (item.type === 'audio') {
-            const summary = item.aiSummary?.trim() || 'Sin resumen disponible.';
-            return [
-              `- AUDIO | ${item.title}`,
-              `  Fecha: ${formatDate(item.createdAt)}`,
-              `  DUR.: ${formatDuration(item.durationMillis)}`,
-              `  Resumen: ${summary}`,
-            ].join('\n');
-          }
-
-          const meds = item.ocrParsed?.medications ?? [];
-          const medsText =
-            meds.length > 0
-              ? meds
-                  .slice(0, 8)
-                  .map((med) => {
-                    const detail = [med.dose, med.frequency, med.duration].filter(Boolean).join(' · ');
-                    return detail ? `    - ${med.name}: ${detail}` : `    - ${med.name}`;
-                  })
-                  .join('\n')
-              : '    - Sin medicamentos detectados';
-          const indications = item.ocrParsed?.indicationsGeneral?.trim();
-          const ocrRaw = item.ocrParsed?.rawText?.trim() || item.ocrText?.trim() || '[SIN_TEXTO]';
-          const recipeText = [
-            `- FOTO RECETA | ${item.title}`,
-            `  Fecha: ${formatDate(item.createdAt)}`,
-            `  Paciente: ${item.ocrParsed?.patientName || 'No identificado'}`,
-            `  Medicamentos:`,
-            medsText,
-            `  Indicaciones: ${indications || 'No detectadas'}`,
-            `  Texto OCR: ${ocrRaw}`,
-          ];
-          return recipeText.join('\n');
-        })
-        .join('\n\n')
-    : '- Sin registros seleccionados';
+    ? [
+        `Registros seleccionados: ${selected.length}`,
+        `Fotos seleccionadas: ${photos.length}`,
+        `Audios seleccionados: ${audios.length}`,
+        `Duración total audios seleccionados: ${formatDuration(audioDuration)}`,
+      ].join('\n')
+    : 'Sin registros seleccionados';
 
   return [
     'Resumen generado desde Media Hub (registros seleccionados)',
@@ -469,7 +659,7 @@ function buildEmailSummary(settings: AppSettings, media: MediaItem[]) {
     '',
     statsBlock,
     '',
-    'Registros incluidos:',
+    'Resumen de envío:',
     selectedBlock,
   ].join('\n');
 }
@@ -700,5 +890,123 @@ const styles = StyleSheet.create({
     color: '#0F172A',
     fontSize: 14,
     fontWeight: '800',
+  },
+  captureStage: {
+    position: 'absolute',
+    left: -5000,
+    top: -5000,
+    width: 390,
+    backgroundColor: '#FFFFFF',
+  },
+  captureCard: {
+    width: 390,
+    backgroundColor: '#F8FAFC',
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 14,
+  },
+  captureTitle: {
+    color: '#0F172A',
+    fontSize: 24,
+    fontWeight: '900',
+    marginBottom: 6,
+  },
+  captureMeta: {
+    color: '#475569',
+    fontSize: 13,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  captureHeaderArea: {
+    position: 'relative',
+    marginTop: 4,
+    minHeight: 112,
+    paddingRight: 142,
+  },
+  captureHeaderInfo: {
+    paddingTop: 2,
+  },
+  captureTotalCardFloating: {
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    width: 132,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#EA580C',
+    backgroundColor: '#F97316',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    alignItems: 'flex-end',
+  },
+  captureTotalLabel: {
+    color: '#FFEDD5',
+    fontSize: 12,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    textAlign: 'right',
+  },
+  captureTotalValue: {
+    color: '#FFFFFF',
+    fontSize: 28,
+    fontWeight: '900',
+    marginTop: 2,
+    textAlign: 'right',
+  },
+  captureSection: {
+    marginTop: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    backgroundColor: '#FFFFFF',
+    padding: 10,
+  },
+  captureSectionTitle: {
+    color: '#1E3A8A',
+    fontSize: 12,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    marginBottom: 5,
+  },
+  captureText: {
+    color: '#0F172A',
+    fontSize: 14,
+    lineHeight: 18,
+    fontWeight: '700',
+  },
+  captureSubText: {
+    color: '#475569',
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: 1,
+  },
+  captureMedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    paddingVertical: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  capturePrice: {
+    color: '#047857',
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  capturePriceMissing: {
+    color: '#B91C1C',
+  },
+  captureHint: {
+    color: '#B45309',
+    fontSize: 12,
+    marginTop: 8,
+    fontWeight: '700',
+  },
+  captureRaw: {
+    color: '#334155',
+    fontSize: 12,
+    lineHeight: 18,
   },
 });

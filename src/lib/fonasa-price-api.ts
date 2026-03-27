@@ -282,5 +282,13 @@ function normalizeFonasaDetail(data: any): FonasaPharmacyDetail[] {
     }
   }
 
-  return out.sort((a, b) => (a.distancia ?? Number.MAX_SAFE_INTEGER) - (b.distancia ?? Number.MAX_SAFE_INTEGER));
+  return out.sort((a, b) => {
+    const aFonasa = a.ofertaFonasa ?? Number.MAX_SAFE_INTEGER;
+    const bFonasa = b.ofertaFonasa ?? Number.MAX_SAFE_INTEGER;
+    if (aFonasa !== bFonasa) return aFonasa - bFonasa;
+
+    const aDist = a.distancia ?? Number.MAX_SAFE_INTEGER;
+    const bDist = b.distancia ?? Number.MAX_SAFE_INTEGER;
+    return aDist - bDist;
+  });
 }
