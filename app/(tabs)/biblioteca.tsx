@@ -1056,37 +1056,101 @@ export default function BibliotecaScreen() {
           </View>
         ) : (
           groupedPhotos.map((group) => {
+            const firstItem = group.items[0];
+            const patientName =
+              group.items.map(i => i.bonoParsed?.beneficiario_nombre || i.ocrParsed?.patientName).find(Boolean) || '';
+            const doctorName =
+              group.items.map(i => i.bonoParsed?.profesional_nombre || i.ocrParsed?.doctorName).find(Boolean) || '';
+            const date =
+              group.items.map(i => i.bonoParsed?.fecha_atencion || i.bonoParsed?.fecha_emision || i.ocrParsed?.date).find(Boolean) || '';
+            const center =
+              group.items.map(i => i.bonoParsed?.prestador_nombre || i.ocrParsed?.institution).find(Boolean) || '';
+
+            const hasReceta = group.items.some(i => i.ocrStatus === 'done');
+            const hasBono = group.items.some(i => i.bonoStatus === 'done');
+            const recetaPending = !hasReceta && group.items.some(i => i.ocrStatus === 'pending');
+            const bonoPending = !hasBono && group.items.some(i => i.bonoStatus === 'pending');
+
             return (
-              <View key={group.groupId} style={styles.groupCard}>
-                <View style={styles.groupHeader}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.groupTitle} numberOfLines={1}>
-                      {getGroupTitle(group)}
-                    </Text>
-                    <Text style={styles.groupMeta}>{formatDate(group.createdAt)}</Text>
-                  </View>
+              <Pressable key={group.groupId} style={styles.groupCard} onPress={() => setPreviewGroup(group)}>
+                <View style={styles.groupRow}>
+                  {firstItem?.uri ? (
+                    <Image source={{ uri: firstItem.uri }} style={styles.groupThumb} />
+                  ) : (
+                    <View style={[styles.groupThumb, styles.groupThumbPlaceholder]}>
+                      <Ionicons name="image-outline" size={28} color="#94A3B8" />
+                    </View>
+                  )}
 
-                  <Pressable style={styles.iconButton} onPress={() => openEditTitle(group)}>
-                    <Ionicons name="create-outline" size={18} color="#0F172A" />
-                  </Pressable>
-                  <Pressable style={styles.iconButton} onPress={() => shareGroupRecipe(group)}>
-                    <Ionicons name="share-outline" size={18} color="#1E3A8A" />
-                  </Pressable>
-                  <Pressable style={styles.iconButtonDanger} onPress={() => confirmDeleteGroup(group)}>
-                    <Ionicons name="trash-outline" size={18} color="#DC2626" />
-                  </Pressable>
-                </View>
+                  <View style={styles.groupBody}>
+                    <View style={styles.groupHeader}>
+                      <Text style={styles.groupTitle} numberOfLines={1}>
+                        {patientName || getGroupTitle(group)}
+                      </Text>
+                      <View style={styles.groupActions}>
+                        <Pressable style={styles.iconButton} onPress={() => openEditTitle(group)}>
+                          <Ionicons name="create-outline" size={16} color="#0F172A" />
+                        </Pressable>
+                        <Pressable style={styles.iconButton} onPress={() => shareGroupRecipe(group)}>
+                          <Ionicons name="share-outline" size={16} color="#1E3A8A" />
+                        </Pressable>
+                        <Pressable style={styles.iconButtonDanger} onPress={() => confirmDeleteGroup(group)}>
+                          <Ionicons name="trash-outline" size={16} color="#DC2626" />
+                        </Pressable>
+                      </View>
+                    </View>
 
-                <View style={styles.groupBody}>
-                  <Pressable style={styles.photoCountCard} onPress={() => setPreviewGroup(group)}>
-                    <Ionicons name="images-outline" size={28} color="#1E3A8A" />
-                    <Text style={styles.photoCountNumber}>{group.items.length}</Text>
-                    <Text style={styles.photoCountLabel}>fotos</Text>
-                  </Pressable>
+                    {doctorName ? (
+                      <Text style={styles.groupDoctor} numberOfLines={1}>{doctorName}</Text>
+                    ) : null}
 
-                  <Pressable style={styles.summaryCard} onPress={() => setPreviewGroup(group)}>
-                    <View style={styles.summaryTopRow}>
-                      <Text style={styles.summaryLabel}>Texto extraído</Text>
+                    <View style={styles.groupMeta}>
+                      {date ? (
+                        <View style={styles.groupMetaItem}>
+                          <Ionicons name="calendar-outline" size={12} color="#94A3B8" />
+                          <Text style={styles.groupMetaText}>{date}</Text>
+                        </View>
+                      ) : null}
+                      {center ? (
+                        <View style={styles.groupMetaItem}>
+                          <Ionicons name="business-outline" size={12} color="#94A3B8" />
+                          <Text style={styles.groupMetaText} numberOfLines={1}>{center}</Text>
+                        </View>
+                      ) : null}
+                      {!date && !center ? (
+                        <Text style={styles.groupMetaText}>{formatDate(group.createdAt)}</Text>
+                      ) : null}
+                    </View>
+
+                    <View style={styles.groupPills}>
+                      <View style={[
+                        styles.pill,
+                        hasReceta ? styles.pillReceta : recetaPending ? styles.pillPending : styles.pillLocked
+                      ]}>
+                        <Ionicons
+                          name={recetaPending ? 'time-outline' : hasReceta ? 'document-text-outline' : 'lock-closed-outline'}
+                          size={11}
+                          color={hasReceta ? '#10B981' : recetaPending ? '#94A3B8' : '#CBD5E1'}
+                        />
+                        <Text style={[styles.pillText, hasReceta ? styles.pillTextReceta : recetaPending ? styles.pillTextPending : styles.pillTextLocked]}>
+                          Receta
+                        </Text>
+                      </View>
+
+                      <View style={[
+                        styles.pill,
+                        hasBono ? styles.pillBono : bonoPending ? styles.pillPending : styles.pillLocked
+                      ]}>
+                        <Ionicons
+                          name={bonoPending ? 'time-outline' : hasBono ? 'receipt-outline' : 'lock-closed-outline'}
+                          size={11}
+                          color={hasBono ? '#6366F1' : bonoPending ? '#94A3B8' : '#CBD5E1'}
+                        />
+                        <Text style={[styles.pillText, hasBono ? styles.pillTextBono : bonoPending ? styles.pillTextPending : styles.pillTextLocked]}>
+                          Bono
+                        </Text>
+                      </View>
+
                       {canRetryGroupOcr(group) ? (
                         <Pressable
                           style={[styles.retryButton, retryingGroupIds[group.groupId] && { opacity: 0.6 }]}
@@ -1096,23 +1160,14 @@ export default function BibliotecaScreen() {
                           {retryingGroupIds[group.groupId] ? (
                             <ActivityIndicator size="small" color="#1E3A8A" />
                           ) : (
-                            <Ionicons name="refresh" size={14} color="#1E3A8A" />
+                            <Ionicons name="refresh" size={13} color="#1E3A8A" />
                           )}
                         </Pressable>
                       ) : null}
                     </View>
-                    {isGroupProcessing(group) ? (
-                      <View style={styles.processingRow}>
-                        <ActivityIndicator size="small" color="#1E3A8A" />
-                        <Text style={styles.processingText}>Procesando receta...</Text>
-                      </View>
-                    ) : null}
-                    <Text style={styles.summaryText} numberOfLines={4}>
-                      {getGroupSummary(group)}
-                    </Text>
-                  </Pressable>
+                  </View>
                 </View>
-              </View>
+              </Pressable>
             );
           })
         )}
@@ -1735,29 +1790,97 @@ const styles = StyleSheet.create({
   },
   groupCard: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 18,
+    borderRadius: 20,
     borderWidth: 1,
-    borderColor: '#D1FAE5',
-    padding: 12,
+    borderColor: '#E2E8F0',
+    padding: 14,
     marginBottom: 12,
+    shadowColor: '#000',
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 1,
+  },
+  groupRow: {
+    flexDirection: 'row',
+    gap: 14,
+    alignItems: 'flex-start',
+  },
+  groupThumb: {
+    width: 72,
+    height: 72,
+    borderRadius: 14,
+    backgroundColor: '#E2E8F0',
+  },
+  groupThumbPlaceholder: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  groupBody: {
+    flex: 1,
+    gap: 3,
   },
   groupHeader: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginBottom: 10,
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+  },
+  groupActions: {
+    flexDirection: 'row',
+    gap: 4,
   },
   groupTitle: {
-    color: '#064E3B',
-    fontSize: 20,
-    fontWeight: '900',
+    flex: 1,
+    color: '#0F172A',
+    fontSize: 16,
+    fontWeight: '800',
+    marginRight: 6,
   },
-  groupMeta: {
+  groupDoctor: {
     color: '#475569',
     fontSize: 13,
-    fontWeight: '700',
-    marginTop: 3,
+    fontWeight: '600',
   },
+  groupMeta: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 2,
+  },
+  groupMetaItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  groupMetaText: {
+    color: '#94A3B8',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  groupPills: {
+    flexDirection: 'row',
+    gap: 6,
+    marginTop: 6,
+    alignItems: 'center',
+  },
+  pill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  pillReceta: { backgroundColor: '#D1FAE518', borderColor: '#10B98140' },
+  pillBono: { backgroundColor: '#6366F118', borderColor: '#6366F140' },
+  pillPending: { backgroundColor: '#F8FAFC', borderColor: '#E2E8F0' },
+  pillLocked: { backgroundColor: '#F1F5F9', borderColor: '#E2E8F0' },
+  pillText: { fontSize: 11, fontWeight: '700' },
+  pillTextReceta: { color: '#10B981' },
+  pillTextBono: { color: '#6366F1' },
+  pillTextPending: { color: '#94A3B8' },
+  pillTextLocked: { color: '#CBD5E1' },
   iconButton: {
     width: 34,
     height: 34,
@@ -1773,10 +1896,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFF1F2',
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  groupBody: {
-    flexDirection: 'row',
-    gap: 10,
   },
   photoCountCard: {
     width: 92,
