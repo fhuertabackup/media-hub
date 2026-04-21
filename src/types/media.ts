@@ -1,4 +1,4 @@
-import { PhotoPrescriptionParsed } from './ocr';
+import { BonoParsed, PhotoPrescriptionParsed } from './ocr';
 
 export type MediaType = 'photo' | 'audio';
 export type MediaFilter = 'all' | 'photo' | 'audio';
@@ -19,6 +19,9 @@ export interface PhotoItem extends BaseMediaItem {
   ocrParsed?: PhotoPrescriptionParsed;
   ocrStatus?: 'pending' | 'done' | 'error';
   ocrError?: string;
+  bonoStatus?: 'pending' | 'done' | 'error';
+  bonoParsed?: BonoParsed;
+  bonoError?: string;
   priceLookupCache?: {
     provider: 'fonasa';
     updatedAt: string;

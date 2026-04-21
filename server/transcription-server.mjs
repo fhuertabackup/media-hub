@@ -28,6 +28,7 @@ const ocrFallbackModels = (process.env.OPENROUTER_OCR_FALLBACK_MODELS ?? '')
   .split(',')
   .map((item) => item.trim())
   .filter(Boolean);
+const saludToolsBaseUrl = (process.env.SALUD_TOOLS_BASE_URL ?? '').replace(/\/$/, '');
 const ffmpegBinaryPath =
   (typeof ffmpegStatic === 'string' && ffmpegStatic.trim()) || process.env.FFMPEG_PATH || 'ffmpeg';
 
@@ -296,93 +297,84 @@ app.post('/api/photos/ocr', upload.single('photo'), async (req, res) => {
     if (!file) {
       return res.status(400).json({ error: 'photo file is required' });
     }
-
-    const imageType = detectImageMime(file.mimetype, file.originalname);
-    if (!imageType) {
-      return res.status(400).json({ error: 'Unsupported image format' });
+    if (!saludToolsBaseUrl) {
+      return res.status(500).json({ error: 'Missing SALUD_TOOLS_BASE_URL' });
     }
 
-    const imageDataUrl = `data:${imageType};base64,${file.buffer.toString('base64')}`;
-    const modelCandidates = [...new Set([ocrModel, ...ocrFallbackModels])];
-    let text = '';
-    let parsed = null;
-    let selectedModel = modelCandidates[0];
-    let lastFailure = null;
+    const forward = new FormData();
+    forward.append(
+      'photo',
+      new Blob([file.buffer], { type: file.mimetype }),
+      file.originalname || 'photo.jpg'
+    );
 
-    for (const candidateModel of modelCandidates) {
-      const payload = {
-        model: candidateModel,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'text',
-                text: buildPhotoOcrInstruction(),
-              },
-              {
-                type: 'image_url',
-                image_url: { url: imageDataUrl },
-              },
-            ],
-          },
-        ],
-        stream: false,
-        temperature: 0,
-      };
+    const upstream = await fetch(`${saludToolsBaseUrl}/api/photos/analyze`, {
+      method: 'POST',
+      body: forward,
+    });
+    const data = await upstream.json().catch(() => null);
 
-      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${openRouterKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-      });
-      const data = await response.json().catch(() => null);
-
-      if (!response.ok) {
-        const providerRaw = data?.error?.metadata?.raw;
-        const providerMessage = typeof providerRaw === 'string' ? extractProviderMessage(providerRaw) : '';
-        lastFailure = {
-          status: response.status,
-          error: providerMessage || data?.error?.message || 'OpenRouter error',
-          details: data,
-        };
-        continue;
-      }
-
-      const extracted = extractTextFromChoice(data).trim();
-      if (!extracted) {
-        lastFailure = {
-          status: 502,
-          error: 'No OCR text returned by model',
-          details: data,
-        };
-        continue;
-      }
-
-      const structured = parsePhotoOcr(extracted);
-      text = structured?.rawText || extracted;
-      parsed = structured;
-      selectedModel = candidateModel;
-      break;
-    }
-
-    if (!text) {
-      return res.status(lastFailure?.status ?? 502).json({
-        error: lastFailure?.error ?? 'OCR failed for all configured models',
-        details: lastFailure?.details ?? null,
+    if (!upstream.ok) {
+      return res.status(upstream.status).json({
+        error: data?.detail || data?.error || 'salud-tools analyze failed',
+        details: data,
       });
     }
 
+    const ocr = data?.ocr ?? {};
     return res.json({
-      text,
-      parsed,
-      model: selectedModel,
+      text: ocr.text ?? '',
+      parsed: ocr.parsed ?? null,
+      model: ocr.model ?? '',
+      candidates: data?.candidates ?? [],
+      vademecumMatches: data?.vademecumMatches ?? [],
+      inference: data?.inference ?? null,
     });
   } catch (error) {
-    console.error('photo ocr error', error);
+    console.error('photo ocr proxy error', error);
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : 'Unknown server error',
+    });
+  }
+});
+
+app.post('/api/bonos/analyze', upload.single('photo'), async (req, res) => {
+  try {
+    const file = req.file;
+    if (!file) {
+      return res.status(400).json({ error: 'photo file is required' });
+    }
+    if (!saludToolsBaseUrl) {
+      return res.status(500).json({ error: 'Missing SALUD_TOOLS_BASE_URL' });
+    }
+
+    const forward = new FormData();
+    forward.append('photo', new Blob([file.buffer], { type: file.mimetype }), file.originalname || 'photo.jpg');
+    forward.append('save', 'true');
+    forward.append('source', 'app');
+
+    const upstream = await fetch(`${saludToolsBaseUrl}/api/bonos/analyze`, {
+      method: 'POST',
+      body: forward,
+    });
+    const data = await upstream.json().catch(() => null);
+
+    if (!upstream.ok) {
+      return res.status(upstream.status).json({
+        error: data?.detail || data?.error || 'salud-tools bono analyze failed',
+        details: data,
+      });
+    }
+
+    const ocr = data?.ocr ?? {};
+    return res.json({
+      text: ocr.text ?? '',
+      parsed: ocr.parsed ?? null,
+      model: ocr.model ?? '',
+      saved: data?.saved ?? null,
+    });
+  } catch (error) {
+    console.error('bono analyze proxy error', error);
     return res.status(500).json({
       error: error instanceof Error ? error.message : 'Unknown server error',
     });
@@ -593,19 +585,6 @@ function detectFormat(mimetype = '', fileName = '') {
     ext === 'mp4'
   ) {
     return 'm4a';
-  }
-
-  return null;
-}
-
-function detectImageMime(mimetype = '', fileName = '') {
-  const ext = fileName.split('.').pop()?.toLowerCase();
-
-  if (mimetype.includes('png') || ext === 'png') return 'image/png';
-  if (mimetype.includes('webp') || ext === 'webp') return 'image/webp';
-  if (mimetype.includes('heic') || ext === 'heic') return 'image/heic';
-  if (mimetype.includes('jpeg') || mimetype.includes('jpg') || ext === 'jpg' || ext === 'jpeg') {
-    return 'image/jpeg';
   }
 
   return null;
@@ -997,64 +976,3 @@ function normalizeFonasaDetail(data) {
   });
 }
 
-function buildPhotoOcrInstruction() {
-  return (
-    'Analiza esta imagen de receta médica y devuelve SOLO JSON válido (sin markdown ni texto extra) con este esquema exacto:\n' +
-    '{"raw_text":"string","institution":"string","doctor_name":"string","doctor_license":"string","patient_name":"string","date":"string","indications_general":"string","medications":[{"name":"string","dose":"string","frequency":"string","duration":"string","notes":"string"}]}\n' +
-    'Reglas:\n' +
-    '- Es SIEMPRE una receta médica del paciente.\n' +
-    '- raw_text: TODO el texto visible literal, sin resumir.\n' +
-    '- No inventes datos.\n' +
-    '- patient_name es obligatorio: si no aparece, usa "PACIENTE_NO_IDENTIFICADO".\n' +
-    '- Si otro campo no aparece, usa string vacío "".\n' +
-    '- medications debe listar cada medicamento encontrado; si no hay, devuelve []\n' +
-    '- Si no hay texto legible, devuelve {"raw_text":"[SIN_TEXTO]","institution":"","doctor_name":"","doctor_license":"","patient_name":"PACIENTE_NO_IDENTIFICADO","date":"","indications_general":"","medications":[]}.'
-  );
-}
-
-function parsePhotoOcr(rawContent) {
-  if (!rawContent) return null;
-
-  try {
-    const jsonText = extractJsonCandidate(rawContent);
-    const parsed = JSON.parse(jsonText);
-    return normalizePhotoOcrParsed(parsed);
-  } catch {
-    return {
-      rawText: String(rawContent).trim() || '[SIN_TEXTO]',
-      institution: '',
-      doctorName: '',
-      doctorLicense: '',
-      patientName: '',
-      date: '',
-      indicationsGeneral: '',
-      medications: [],
-    };
-  }
-}
-
-function normalizePhotoOcrParsed(value) {
-  const rawText = String(value?.raw_text ?? '').trim() || '[SIN_TEXTO]';
-
-  const medicationsInput = Array.isArray(value?.medications) ? value.medications : [];
-  const medications = medicationsInput
-    .map((med) => ({
-      name: String(med?.name ?? '').trim(),
-      dose: String(med?.dose ?? '').trim(),
-      frequency: String(med?.frequency ?? '').trim(),
-      duration: String(med?.duration ?? '').trim(),
-      notes: String(med?.notes ?? '').trim(),
-    }))
-    .filter((med) => med.name);
-
-  return {
-    rawText,
-    institution: String(value?.institution ?? '').trim(),
-    doctorName: String(value?.doctor_name ?? '').trim(),
-    doctorLicense: String(value?.doctor_license ?? '').trim(),
-    patientName: String(value?.patient_name ?? '').trim() || 'PACIENTE_NO_IDENTIFICADO',
-    date: String(value?.date ?? '').trim(),
-    indicationsGeneral: String(value?.indications_general ?? '').trim(),
-    medications,
-  };
-}

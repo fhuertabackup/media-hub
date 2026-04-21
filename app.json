@@ -48,6 +48,12 @@
       "expo-audio",
       "expo-camera"
     ],
+    "updates": {
+      "url": "https://u.expo.dev/fdf9ed62-6270-4371-b70f-91af7ce5de7b"
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
     "experiments": {
       "typedRoutes": true
     },

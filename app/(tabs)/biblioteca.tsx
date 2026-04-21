@@ -31,6 +31,7 @@ import {
   updateMediaItem,
 } from '../../src/lib/media-store';
 import { generatePhotoGroupTitle, ocrPhoto } from '../../src/lib/photo-ocr-api';
+import { analyzeBonoPhoto } from '../../src/lib/bono-api';
 import {
   lookupFonasaPrices,
   lookupFonasaDetail,
@@ -556,6 +557,22 @@ export default function BibliotecaScreen() {
     }
   }, []);
 
+  const runBonoAnalyze = useCallback(async (photo: PhotoItem) => {
+    try {
+      await updateMediaItem(photo.id, { bonoStatus: 'pending', bonoError: '' });
+      const result = await analyzeBonoPhoto({ uri: photo.uri });
+      await updateMediaItem(photo.id, {
+        bonoParsed: result.parsed,
+        bonoStatus: 'done',
+        bonoError: '',
+      });
+    } catch (error) {
+      console.error(error);
+      const message = error instanceof Error ? error.message : 'No se pudo analizar bono.';
+      await updateMediaItem(photo.id, { bonoStatus: 'error', bonoError: message });
+    }
+  }, []);
+
   const autoGenerateGroupTitle = useCallback(
     async (groupId: string) => {
       const all = await getAllMedia();
@@ -638,6 +655,7 @@ export default function BibliotecaScreen() {
 
       for (const item of createdItems) {
         await runPhotoOcr(item);
+        await runBonoAnalyze(item);
       }
 
       await loadPhotos();
@@ -659,6 +677,7 @@ export default function BibliotecaScreen() {
         setRetryingGroupIds((prev) => ({ ...prev, [group.groupId]: true }));
         for (const photo of group.items) {
           await runPhotoOcr(photo);
+          await runBonoAnalyze(photo);
         }
         await loadPhotos();
         await autoGenerateGroupTitle(group.groupId);
@@ -670,7 +689,7 @@ export default function BibliotecaScreen() {
         setRetryingGroupIds((prev) => ({ ...prev, [group.groupId]: false }));
       }
     },
-    [autoGenerateGroupTitle, loadPhotos, retryingGroupIds, runPhotoOcr]
+    [autoGenerateGroupTitle, loadPhotos, retryingGroupIds, runPhotoOcr, runBonoAnalyze]
   );
 
   const confirmDeletePhoto = (photo: PhotoItem) => {
