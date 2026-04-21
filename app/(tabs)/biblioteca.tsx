@@ -1070,6 +1070,7 @@ export default function BibliotecaScreen() {
             const hasBono = group.items.some(i => i.bonoStatus === 'done');
             const recetaPending = !hasReceta && group.items.some(i => i.ocrStatus === 'pending');
             const bonoPending = !hasBono && group.items.some(i => i.bonoStatus === 'pending');
+            const ocrError = group.items.map(i => i.ocrError).find(Boolean) || '';
 
             return (
               <Pressable key={group.groupId} style={styles.groupCard} onPress={() => setPreviewGroup(group)}>
@@ -1121,6 +1122,10 @@ export default function BibliotecaScreen() {
                         <Text style={styles.groupMetaText}>{formatDate(group.createdAt)}</Text>
                       ) : null}
                     </View>
+
+                    {ocrError ? (
+                      <Text style={styles.groupErrorText} numberOfLines={2}>{ocrError}</Text>
+                    ) : null}
 
                     <View style={styles.groupPills}>
                       <View style={[
@@ -1881,6 +1886,12 @@ const styles = StyleSheet.create({
   pillTextBono: { color: '#6366F1' },
   pillTextPending: { color: '#94A3B8' },
   pillTextLocked: { color: '#CBD5E1' },
+  groupErrorText: {
+    color: '#DC2626',
+    fontSize: 11,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
   iconButton: {
     width: 34,
     height: 34,
