@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import cors from 'cors';
 import express from 'express';
+import { setupDb, checkAndRecord } from './db.mjs';
 import multer from 'multer';
 import ffmpegStatic from 'ffmpeg-static';
 import { randomUUID } from 'node:crypto';
@@ -67,6 +68,8 @@ app.post('/api/transcriptions', upload.single('audio'), async (req, res) => {
     if (!file) {
       return res.status(400).json({ error: 'audio file is required' });
     }
+    const deviceId = req.headers['x-device-id'] || null;
+    await checkAndRecord(deviceId, 'transcripcion');
 
     const preparedAudio = await prepareAudioForProvider(file);
 
@@ -133,6 +136,9 @@ app.post('/api/transcriptions', upload.single('audio'), async (req, res) => {
       usage: data?.usage ?? null,
     });
   } catch (error) {
+    if (error.code === 'LIMIT_EXCEEDED') {
+      return res.status(429).json({ error: error.message });
+    }
     console.error('transcription error', error);
     return res.status(500).json({
       error: error instanceof Error ? error.message : 'Unknown server error',
@@ -297,6 +303,8 @@ app.post('/api/photos/ocr', upload.single('photo'), async (req, res) => {
     if (!file) {
       return res.status(400).json({ error: 'photo file is required' });
     }
+    const deviceId = req.headers['x-device-id'] || null;
+    await checkAndRecord(deviceId, 'receta');
     if (!saludToolsBaseUrl) {
       return res.status(500).json({ error: 'Missing SALUD_TOOLS_BASE_URL' });
     }
@@ -331,6 +339,9 @@ app.post('/api/photos/ocr', upload.single('photo'), async (req, res) => {
       inference: data?.inference ?? null,
     });
   } catch (error) {
+    if (error.code === 'LIMIT_EXCEEDED') {
+      return res.status(429).json({ error: error.message });
+    }
     console.error('photo ocr proxy error', error);
     return res.status(500).json({
       error: error instanceof Error ? error.message : 'Unknown server error',
@@ -344,6 +355,8 @@ app.post('/api/bonos/analyze', upload.single('photo'), async (req, res) => {
     if (!file) {
       return res.status(400).json({ error: 'photo file is required' });
     }
+    const deviceId = req.headers['x-device-id'] || null;
+    await checkAndRecord(deviceId, 'bono');
     if (!saludToolsBaseUrl) {
       return res.status(500).json({ error: 'Missing SALUD_TOOLS_BASE_URL' });
     }
@@ -374,6 +387,9 @@ app.post('/api/bonos/analyze', upload.single('photo'), async (req, res) => {
       saved: data?.saved ?? null,
     });
   } catch (error) {
+    if (error.code === 'LIMIT_EXCEEDED') {
+      return res.status(429).json({ error: error.message });
+    }
     console.error('bono analyze proxy error', error);
     return res.status(500).json({
       error: error instanceof Error ? error.message : 'Unknown server error',
@@ -566,9 +582,11 @@ app.post('/api/medications/extract', async (req, res) => {
   }
 });
 
-app.listen(port, host, () => {
-  console.log(`Transcription API listening on http://${host}:${port}`);
-  console.log(`FFmpeg binary: ${ffmpegBinaryPath}`);
+setupDb().then(() => {
+  app.listen(port, host, () => {
+    console.log(`Transcription API listening on http://${host}:${port}`);
+    console.log(`FFmpeg binary: ${ffmpegBinaryPath}`);
+  });
 });
 
 function detectFormat(mimetype = '', fileName = '') {

@@ -29,7 +29,7 @@ export interface BonoItem {
 }
 
 export interface BonoParsed {
-  document_type: 'bono';
+  document_type: 'bono' | 'receta' | 'otro';
   provider: 'FONASA' | 'DIPRECA' | 'ISAPRE' | 'OTRO';
   raw_text: string;
   numero_bono: string;

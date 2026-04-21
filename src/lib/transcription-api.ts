@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import { getDeviceId } from './settings-store';
 
 interface TranscribeArgs {
   uri: string;
@@ -16,13 +17,11 @@ interface EnrichResult {
   model: string;
 }
 
-const apiBaseUrl = process.env.EXPO_PUBLIC_TRANSCRIBE_API_URL;
+const PRODUCTION_API_URL = 'https://media-hub-production.up.railway.app';
+const apiBaseUrl = process.env.EXPO_PUBLIC_TRANSCRIBE_API_URL || PRODUCTION_API_URL;
 
 export async function transcribeAudio({ uri, durationMillis }: TranscribeArgs): Promise<TranscribeResult> {
-  if (!apiBaseUrl) {
-    throw new Error('Missing EXPO_PUBLIC_TRANSCRIBE_API_URL.');
-  }
-
+  const deviceId = await getDeviceId();
   const formData = new FormData();
   const fileName = makeFileName(uri);
   const mimeType = inferMimeType(uri);
@@ -40,7 +39,10 @@ export async function transcribeAudio({ uri, durationMillis }: TranscribeArgs): 
   const response = await fetch(`${normalizeBaseUrl(apiBaseUrl)}/api/transcriptions`, {
     method: 'POST',
     body: formData,
-    headers: Platform.OS === 'web' ? { Accept: 'application/json' } : undefined,
+    headers: {
+      'x-device-id': deviceId,
+      ...(Platform.OS === 'web' ? { Accept: 'application/json' } : {}),
+    },
   });
 
   const data = await response.json().catch(() => null);
@@ -60,9 +62,6 @@ export async function transcribeAudio({ uri, durationMillis }: TranscribeArgs): 
 }
 
 export async function enrichTranscript(transcript: string): Promise<EnrichResult> {
-  if (!apiBaseUrl) {
-    throw new Error('Missing EXPO_PUBLIC_TRANSCRIBE_API_URL.');
-  }
   if (!transcript.trim()) {
     throw new Error('Transcript is empty.');
   }

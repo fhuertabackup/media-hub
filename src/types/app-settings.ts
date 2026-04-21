@@ -3,6 +3,7 @@ export interface AppSettings {
   personInfo: string;
   emergencyContactName: string;
   emergencyEmail: string;
+  deviceId: string;
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -10,4 +11,5 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   personInfo: '',
   emergencyContactName: '',
   emergencyEmail: '',
+  deviceId: '',
 };

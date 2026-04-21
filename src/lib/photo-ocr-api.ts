@@ -1,5 +1,6 @@
 import { Platform } from 'react-native';
 import { PhotoPrescriptionParsed } from '../types/ocr';
+import { getDeviceId } from './settings-store';
 
 interface OcrPhotoArgs {
   uri: string;
@@ -16,13 +17,11 @@ interface PhotoTitleResult {
   model: string;
 }
 
-const apiBaseUrl = process.env.EXPO_PUBLIC_TRANSCRIBE_API_URL;
+const PRODUCTION_API_URL = 'https://media-hub-production.up.railway.app';
+const apiBaseUrl = process.env.EXPO_PUBLIC_TRANSCRIBE_API_URL || PRODUCTION_API_URL;
 
 export async function ocrPhoto({ uri }: OcrPhotoArgs): Promise<OcrPhotoResult> {
-  if (!apiBaseUrl) {
-    throw new Error('Missing EXPO_PUBLIC_TRANSCRIBE_API_URL.');
-  }
-
+  const deviceId = await getDeviceId();
   const formData = new FormData();
   const fileName = makeFileName(uri);
   const mimeType = inferMimeType(uri);
@@ -39,7 +38,10 @@ export async function ocrPhoto({ uri }: OcrPhotoArgs): Promise<OcrPhotoResult> {
   const response = await fetch(`${normalizeBaseUrl(apiBaseUrl)}/api/photos/ocr`, {
     method: 'POST',
     body: formData,
-    headers: Platform.OS === 'web' ? { Accept: 'application/json' } : undefined,
+    headers: {
+      'x-device-id': deviceId,
+      ...(Platform.OS === 'web' ? { Accept: 'application/json' } : {}),
+    },
   });
 
   const data = await response.json().catch(() => null);
@@ -60,10 +62,6 @@ export async function ocrPhoto({ uri }: OcrPhotoArgs): Promise<OcrPhotoResult> {
 }
 
 export async function generatePhotoGroupTitle(text: string): Promise<PhotoTitleResult> {
-  if (!apiBaseUrl) {
-    throw new Error('Missing EXPO_PUBLIC_TRANSCRIBE_API_URL.');
-  }
-
   const response = await fetch(`${normalizeBaseUrl(apiBaseUrl)}/api/photos/title`, {
     method: 'POST',
     headers: {

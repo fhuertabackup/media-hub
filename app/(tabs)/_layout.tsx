@@ -1,10 +1,13 @@
 import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { StyleSheet } from 'react-native';
+import { StyleSheet, View } from 'react-native';
+import { UpdateBanner } from '../../src/components/UpdateBanner';
 
 export default function TabsLayout() {
   return (
-    <Tabs
+    <View style={{ flex: 1 }}>
+      <UpdateBanner />
+      <Tabs
       screenOptions={{
         headerShown: false,
         tabBarActiveTintColor: '#6D28D9',
@@ -60,6 +63,7 @@ export default function TabsLayout() {
         }}
       />
     </Tabs>
+    </View>
   );
 }
 

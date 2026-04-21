@@ -1,14 +1,11 @@
 import { Platform } from 'react-native';
 
-const apiBaseUrl = process.env.EXPO_PUBLIC_TRANSCRIBE_API_URL;
+const PRODUCTION_API_URL = 'https://media-hub-production.up.railway.app';
+const apiBaseUrl = process.env.EXPO_PUBLIC_TRANSCRIBE_API_URL || PRODUCTION_API_URL;
 
 export async function extractMedicationNames(text: string): Promise<string[]> {
   const clean = text.trim();
   if (!clean || clean === '[SIN_TEXTO]') return [];
-
-  if (!apiBaseUrl) {
-    return [];
-  }
 
   const response = await fetch(`${normalizeBaseUrl(apiBaseUrl)}/api/medications/extract`, {
     method: 'POST',

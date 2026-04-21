@@ -53,7 +53,8 @@ export interface FonasaPharmacyDetail {
   ahorro?: number;
 }
 
-const apiBaseUrl = process.env.EXPO_PUBLIC_TRANSCRIBE_API_URL;
+const PRODUCTION_API_URL = 'https://media-hub-production.up.railway.app';
+const apiBaseUrl = process.env.EXPO_PUBLIC_TRANSCRIBE_API_URL || PRODUCTION_API_URL;
 
 export async function lookupFonasaPrices({
   latitud,
@@ -61,10 +62,6 @@ export async function lookupFonasaPrices({
   medications,
 }: LookupArgs): Promise<LookupResponse> {
   const fallback = () => lookupFonasaPricesDirect({ latitud, longitud, medications });
-
-  if (!apiBaseUrl) {
-    return fallback();
-  }
 
   try {
     const response = await fetch(`${normalizeBaseUrl(apiBaseUrl)}/api/prices/fonasa`, {
@@ -115,8 +112,6 @@ export async function lookupFonasaDetail({
       presentacion,
       laboratorio,
     });
-
-  if (!apiBaseUrl) return fallback();
 
   try {
     const response = await fetch(`${normalizeBaseUrl(apiBaseUrl)}/api/prices/fonasa/detail`, {

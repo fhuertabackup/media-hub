@@ -17,6 +17,8 @@ import {
 import * as Sharing from 'expo-sharing';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { GestureDetector, Gesture } from 'react-native-gesture-handler';
+import Animated, { useSharedValue, useAnimatedStyle, withTiming } from 'react-native-reanimated';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
@@ -201,6 +203,40 @@ function computeMedicationTotalApprox(medications: MedicationEntry[], lookup?: G
   }, 0);
 }
 
+function ZoomableImage({ uri }: { uri: string }) {
+  const scale = useSharedValue(1);
+  const savedScale = useSharedValue(1);
+
+  const pinch = Gesture.Pinch()
+    .onUpdate((e) => {
+      scale.value = Math.max(1, savedScale.value * e.scale);
+    })
+    .onEnd(() => {
+      savedScale.value = scale.value;
+    });
+
+  const doubleTap = Gesture.Tap()
+    .numberOfTaps(2)
+    .onEnd(() => {
+      scale.value = withTiming(1);
+      savedScale.value = 1;
+    });
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+  }));
+
+  return (
+    <GestureDetector gesture={Gesture.Simultaneous(pinch, doubleTap)}>
+      <Animated.Image
+        source={{ uri }}
+        style={[{ width: '100%', height: '100%' }, animatedStyle]}
+        resizeMode="contain"
+      />
+    </GestureDetector>
+  );
+}
+
 export default function BibliotecaScreen() {
   const [photos, setPhotos] = useState<PhotoItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -212,10 +248,12 @@ export default function BibliotecaScreen() {
   const [sessionGroupId, setSessionGroupId] = useState<string>('');
 
   const [previewGroup, setPreviewGroup] = useState<PhotoGroup | null>(null);
+  const [detailTab, setDetailTab] = useState<'receta' | 'bono'>('receta');
   const [previewPhoto, setPreviewPhoto] = useState<PhotoItem | null>(null);
   const [galleryGroup, setGalleryGroup] = useState<PhotoGroup | null>(null);
   const [shareCaptureGroup, setShareCaptureGroup] = useState<PhotoGroup | null>(null);
 
+  const [addToGroup, setAddToGroup] = useState<{ groupId: string; type: 'receta' | 'bono' } | null>(null);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const [retryingGroupIds, setRetryingGroupIds] = useState<Record<string, boolean>>({});
@@ -277,6 +315,30 @@ export default function BibliotecaScreen() {
       })
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }, [photos]);
+
+  const displayItems = useMemo(() => {
+    return groupedPhotos.flatMap(group => {
+      const out: Array<{ group: PhotoGroup; type: 'receta' | 'bono' }> = [];
+      const ocrPending = group.items.some(i => i.ocrStatus === 'pending');
+      const bonoPending = group.items.some(i => i.bonoStatus === 'pending');
+      const anyPending = ocrPending || bonoPending;
+      const hasBonoParsed = group.items.some(i => i.bonoParsed?.document_type === 'bono');
+
+      if (anyPending) {
+        out.push({ group, type: 'receta' });
+        return out;
+      }
+
+      const hasRealReceta = !hasBonoParsed && group.items.some(i =>
+        (i.ocrParsed?.medications?.length ?? 0) > 0 ||
+        Boolean(i.ocrParsed?.patientName || i.ocrParsed?.doctorName || i.ocrParsed?.institution)
+      );
+      if (hasRealReceta) out.push({ group, type: 'receta' });
+      if (hasBonoParsed) out.push({ group, type: 'bono' });
+      if (out.length === 0) out.push({ group, type: 'receta' });
+      return out;
+    });
+  }, [groupedPhotos]);
 
   const getCachedPriceLookupForGroup = useCallback((group: PhotoGroup): GroupPriceLookupState | undefined => {
     const cache = group.items.find((item) => item.priceLookupCache)?.priceLookupCache;
@@ -342,6 +404,12 @@ export default function BibliotecaScreen() {
   }, [getCachedPriceLookupForGroup, groupedPhotos]);
 
   useEffect(() => {
+    if (!previewGroup) return;
+    const updated = groupedPhotos.find(g => g.groupId === previewGroup.groupId);
+    if (updated) setPreviewGroup(updated);
+  }, [groupedPhotos]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
     if (!shareCaptureGroup) return;
     let active = true;
 
@@ -382,7 +450,7 @@ export default function BibliotecaScreen() {
   const getGroupTitle = (group: PhotoGroup) => {
     const persisted = group.items.find((item) => item.photoGroupTitle?.trim())?.photoGroupTitle?.trim();
     if (persisted) return persisted;
-    return 'Receta sin título';
+    return 'Documento sin título';
   };
 
   const getGroupTextLines = (group: PhotoGroup) => {
@@ -412,7 +480,7 @@ export default function BibliotecaScreen() {
     const lines = getGroupTextLines(group);
     if (lines.length === 0) {
       const hasPending = group.items.some((item) => item.ocrStatus === 'pending');
-      if (hasPending) return 'Extrayendo texto de receta...';
+      if (hasPending) return 'Analizando documento...';
       return '[SIN_TEXTO]';
     }
     return lines.slice(0, 3).join('\n');
@@ -461,7 +529,7 @@ export default function BibliotecaScreen() {
   };
 
   const isGroupProcessing = (group: PhotoGroup) =>
-    group.items.some((item) => item.ocrStatus === 'pending');
+    group.items.some((item) => item.ocrStatus === 'pending' || item.bonoStatus === 'pending');
 
   const openCameraSession = async () => {
     if (!cameraPermission?.granted) {
@@ -543,6 +611,7 @@ export default function BibliotecaScreen() {
   const runPhotoOcr = useCallback(async (photo: PhotoItem) => {
     try {
       await updateMediaItem(photo.id, { ocrStatus: 'pending', ocrError: '' });
+      await loadPhotos();
       const result = await ocrPhoto({ uri: photo.uri });
       await updateMediaItem(photo.id, {
         ocrText: result.text,
@@ -555,11 +624,12 @@ export default function BibliotecaScreen() {
       const message = error instanceof Error ? error.message : 'No se pudo extraer texto.';
       await updateMediaItem(photo.id, { ocrStatus: 'error', ocrError: message });
     }
-  }, []);
+  }, [loadPhotos]);
 
   const runBonoAnalyze = useCallback(async (photo: PhotoItem) => {
     try {
       await updateMediaItem(photo.id, { bonoStatus: 'pending', bonoError: '' });
+      await loadPhotos();
       const result = await analyzeBonoPhoto({ uri: photo.uri });
       await updateMediaItem(photo.id, {
         bonoParsed: result.parsed,
@@ -571,7 +641,7 @@ export default function BibliotecaScreen() {
       const message = error instanceof Error ? error.message : 'No se pudo analizar bono.';
       await updateMediaItem(photo.id, { bonoStatus: 'error', bonoError: message });
     }
-  }, []);
+  }, [loadPhotos]);
 
   const autoGenerateGroupTitle = useCallback(
     async (groupId: string) => {
@@ -586,7 +656,7 @@ export default function BibliotecaScreen() {
         .map((item) => item.ocrParsed?.patientName?.trim() ?? '')
         .find((name) => name.length > 0 && name !== 'PACIENTE_NO_IDENTIFICADO');
       if (patientName) {
-        const patientTitle = `Receta ${patientName}`.slice(0, 60).trim();
+        const patientTitle = patientName.slice(0, 60).trim();
         for (const item of groupItems) {
           await updateMediaItem(item.id, { photoGroupTitle: patientTitle });
         }
@@ -642,6 +712,7 @@ export default function BibliotecaScreen() {
           createdAt: new Date().toISOString(),
           photoGroupId: groupId,
           ocrStatus: 'pending',
+          bonoStatus: 'pending',
         };
 
         await addMediaItem(item);
@@ -655,10 +726,10 @@ export default function BibliotecaScreen() {
 
       for (const item of createdItems) {
         await runPhotoOcr(item);
+        await loadPhotos();
         await runBonoAnalyze(item);
+        await loadPhotos();
       }
-
-      await loadPhotos();
       await autoGenerateGroupTitle(groupId);
       await loadPhotos();
       Alert.alert('Evento guardado', `Se guardaron ${createdItems.length} fotos.`);
@@ -690,6 +761,72 @@ export default function BibliotecaScreen() {
       }
     },
     [autoGenerateGroupTitle, loadPhotos, retryingGroupIds, runPhotoOcr, runBonoAnalyze]
+  );
+
+  const addPhotoToGroup = useCallback(
+    async (groupId: string, type: 'receta' | 'bono') => {
+      try {
+        const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (!permission.granted) {
+          Alert.alert('Permiso requerido', 'Necesitas permitir acceso a la galería.');
+          return;
+        }
+        const result = await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          allowsMultipleSelection: false,
+          quality: 1,
+        });
+        if (result.canceled || !result.assets?.[0]?.uri) return;
+        const sourceUri = result.assets[0].uri;
+        const id = generateId();
+        const storedUri = await copyPhotoToAppStorage(sourceUri, `photo-${id}.jpg`);
+        const item: PhotoItem = {
+          id,
+          type: 'photo',
+          title: `Foto`,
+          uri: storedUri,
+          createdAt: new Date().toISOString(),
+          photoGroupId: groupId,
+          ocrStatus: type === 'receta' ? 'pending' : undefined,
+          bonoStatus: type === 'bono' ? 'pending' : undefined,
+        };
+        await addMediaItem(item);
+        await loadPhotos();
+        if (type === 'receta') {
+          await runPhotoOcr(item);
+          await loadPhotos();
+          await autoGenerateGroupTitle(groupId);
+        } else {
+          await runBonoAnalyze(item);
+        }
+        await loadPhotos();
+      } catch (error) {
+        console.error(error);
+        Alert.alert('Error', 'No se pudo agregar la foto.');
+      }
+    },
+    [addMediaItem, autoGenerateGroupTitle, copyPhotoToAppStorage, loadPhotos, runBonoAnalyze, runPhotoOcr]
+  );
+
+  const scanMissingForGroup = useCallback(
+    async (group: PhotoGroup, type: 'receta' | 'bono') => {
+      if (retryingGroupIds[group.groupId]) return;
+      try {
+        setRetryingGroupIds((prev) => ({ ...prev, [group.groupId]: true }));
+        for (const photo of group.items) {
+          if (type === 'receta') await runPhotoOcr(photo);
+          else await runBonoAnalyze(photo);
+        }
+        await loadPhotos();
+        if (type === 'receta') await autoGenerateGroupTitle(group.groupId);
+        await loadPhotos();
+      } catch (error) {
+        console.error(error);
+      } finally {
+        setRetryingGroupIds((prev) => ({ ...prev, [group.groupId]: false }));
+      }
+    },
+    [autoGenerateGroupTitle, loadPhotos, retryingGroupIds, runBonoAnalyze, runPhotoOcr]
   );
 
   const confirmDeletePhoto = (photo: PhotoItem) => {
@@ -753,7 +890,7 @@ export default function BibliotecaScreen() {
     if (!editingGroupId) return;
     const clean = editingTitle.trim();
     if (!clean) {
-      Alert.alert('Título requerido', 'Escribe un título corto para la receta.');
+      Alert.alert('Título requerido', 'Escribe un título para el documento.');
       return;
     }
 
@@ -774,11 +911,36 @@ export default function BibliotecaScreen() {
     const month = String(date.getMonth() + 1).padStart(2, '0');
     const hours = String(date.getHours()).padStart(2, '0');
     const minutes = String(date.getMinutes()).padStart(2, '0');
-    return `Receta ${day}/${month} ${hours}:${minutes}`;
+    return `Documento ${day}/${month} ${hours}:${minutes}`;
   };
 
-  const shareGroupRecipe = async (group: PhotoGroup) => {
+  const shareGroupRecipe = async (group: PhotoGroup, type: 'receta' | 'bono' = 'receta') => {
     try {
+      if (type === 'bono') {
+        const bonoParsed = group.items.map(i => i.bonoParsed).find(Boolean);
+        if (!bonoParsed) {
+          Alert.alert('Sin datos', 'No hay datos de bono para compartir.');
+          return;
+        }
+        const itemLines = bonoParsed.items?.map(i =>
+          `- ${i.descripcion || i.codigo}: copago ${i.copago ?? 'N/D'}, a pagar ${i.valor_a_pagar ?? 'N/D'}`
+        ).join('\n') || '- Sin prestaciones';
+        const message = [
+          `Bono: ${getGroupTitle(group)}`,
+          bonoParsed.beneficiario_nombre ? `Beneficiario: ${bonoParsed.beneficiario_nombre}` : '',
+          bonoParsed.profesional_nombre ? `Profesional: ${bonoParsed.profesional_nombre}` : '',
+          bonoParsed.prestador_nombre ? `Centro: ${bonoParsed.prestador_nombre}` : '',
+          bonoParsed.fecha_atencion ? `Fecha: ${bonoParsed.fecha_atencion}` : '',
+          '',
+          'Prestaciones:',
+          itemLines,
+          '',
+          bonoParsed.monto_a_pagar ? `Total a pagar: ${bonoParsed.monto_a_pagar}` : '',
+        ].filter(Boolean).join('\n');
+        await Share.share({ message, title: getGroupTitle(group) });
+        return;
+      }
+
       const screenshotUri = await captureRecipeScreenshot(group);
       if (screenshotUri && (await Sharing.isAvailableAsync())) {
         await Sharing.shareAsync(screenshotUri, {
@@ -820,7 +982,7 @@ export default function BibliotecaScreen() {
       await Share.share({ message, title: getGroupTitle(group) });
     } catch (error) {
       console.error(error);
-      Alert.alert('Error', 'No se pudo compartir la receta.');
+      Alert.alert('Error', 'No se pudo compartir.');
     }
   };
 
@@ -1031,11 +1193,11 @@ export default function BibliotecaScreen() {
       >
         <View style={styles.headerWrap}>
           <SectionHeaderBanner
-            title="Foto receta"
+            title="Documento médico"
             subtitle={`${photos.length} foto${photos.length !== 1 ? 's' : ''} guardada${photos.length !== 1 ? 's' : ''}`}
             icon="images"
             color="#312E81"
-            actionLabel="Foto receta"
+            actionLabel="Agregar foto"
             actionIconOnly
             onPressAction={openCameraSession}
           />
@@ -1044,133 +1206,94 @@ export default function BibliotecaScreen() {
         {loading ? (
           <View style={styles.centerState}>
             <ActivityIndicator size="large" color="#6D28D9" />
-            <Text style={styles.centerText}>Cargando recetas...</Text>
+            <Text style={styles.centerText}>Cargando documentos...</Text>
           </View>
         ) : groupedPhotos.length === 0 ? (
           <View style={styles.emptyCard}>
             <Ionicons name="document-text-outline" size={42} color="#059669" />
-            <Text style={styles.emptyTitle}>Sin eventos de receta</Text>
+            <Text style={styles.emptyTitle}>Sin documentos médicos</Text>
             <Text style={styles.emptyText}>
-              Toca “Foto receta” para capturar una o varias fotos del mismo flujo.
+              Toca “Agregar foto” para capturar una receta o bono médico.
             </Text>
           </View>
         ) : (
-          groupedPhotos.map((group) => {
-            const firstItem = group.items[0];
-            const patientName =
-              group.items.map(i => i.bonoParsed?.beneficiario_nombre || i.ocrParsed?.patientName).find(Boolean) || '';
-            const doctorName =
-              group.items.map(i => i.bonoParsed?.profesional_nombre || i.ocrParsed?.doctorName).find(Boolean) || '';
-            const date =
-              group.items.map(i => i.bonoParsed?.fecha_atencion || i.bonoParsed?.fecha_emision || i.ocrParsed?.date).find(Boolean) || '';
-            const center =
-              group.items.map(i => i.bonoParsed?.prestador_nombre || i.ocrParsed?.institution).find(Boolean) || '';
+          displayItems.map(({ group, type }) => {
+            const isPending = group.items.some(i => i.ocrStatus === 'pending' || i.bonoStatus === 'pending');
+            const isDone = type === 'receta'
+              ? group.items.some(i => i.ocrStatus === 'done')
+              : group.items.some(i => i.bonoParsed);
 
-            const hasReceta = group.items.some(i => i.ocrStatus === 'done');
-            const hasBono = group.items.some(i => i.bonoStatus === 'done');
-            const recetaPending = !hasReceta && group.items.some(i => i.ocrStatus === 'pending');
-            const bonoPending = !hasBono && group.items.some(i => i.bonoStatus === 'pending');
-            const ocrError = group.items.map(i => i.ocrError).find(Boolean) || '';
+            const name = type === 'receta'
+              ? group.items.map(i => i.ocrParsed?.patientName).find(Boolean) || ''
+              : group.items.map(i => i.bonoParsed?.beneficiario_nombre).find(Boolean) || '';
+            const doctor = type === 'receta'
+              ? group.items.map(i => i.ocrParsed?.doctorName).find(Boolean) || ''
+              : group.items.map(i => i.bonoParsed?.profesional_nombre).find(Boolean) || '';
+            const date = type === 'receta'
+              ? group.items.map(i => i.ocrParsed?.date).find(Boolean) || ''
+              : group.items.map(i => i.bonoParsed?.fecha_atencion || i.bonoParsed?.fecha_emision).find(Boolean) || '';
+            const center = type === 'receta'
+              ? group.items.map(i => i.ocrParsed?.institution).find(Boolean) || ''
+              : group.items.map(i => i.bonoParsed?.prestador_nombre).find(Boolean) || '';
+
+            const isReceta = type === 'receta';
+            const accentColor = isReceta ? '#10B981' : '#6366F1';
+            const badgeBg = isReceta ? '#D1FAE518' : '#6366F118';
+            const badgeBorder = isReceta ? '#10B98130' : '#6366F130';
 
             return (
-              <Pressable key={group.groupId} style={styles.groupCard} onPress={() => setPreviewGroup(group)}>
-                <View style={styles.groupRow}>
-                  {firstItem?.uri ? (
-                    <Image source={{ uri: firstItem.uri }} style={styles.groupThumb} />
-                  ) : (
-                    <View style={[styles.groupThumb, styles.groupThumbPlaceholder]}>
-                      <Ionicons name="image-outline" size={28} color="#94A3B8" />
-                    </View>
-                  )}
-
-                  <View style={styles.groupBody}>
-                    <View style={styles.groupHeader}>
-                      <Text style={styles.groupTitle} numberOfLines={1}>
-                        {patientName || getGroupTitle(group)}
-                      </Text>
-                      <View style={styles.groupActions}>
-                        <Pressable style={styles.iconButton} onPress={() => openEditTitle(group)}>
-                          <Ionicons name="create-outline" size={16} color="#0F172A" />
-                        </Pressable>
-                        <Pressable style={styles.iconButton} onPress={() => shareGroupRecipe(group)}>
-                          <Ionicons name="share-outline" size={16} color="#1E3A8A" />
-                        </Pressable>
-                        <Pressable style={styles.iconButtonDanger} onPress={() => confirmDeleteGroup(group)}>
-                          <Ionicons name="trash-outline" size={16} color="#DC2626" />
-                        </Pressable>
-                      </View>
-                    </View>
-
-                    {doctorName ? (
-                      <Text style={styles.groupDoctor} numberOfLines={1}>{doctorName}</Text>
-                    ) : null}
-
-                    <View style={styles.groupMeta}>
-                      {date ? (
-                        <View style={styles.groupMetaItem}>
-                          <Ionicons name="calendar-outline" size={12} color="#94A3B8" />
-                          <Text style={styles.groupMetaText}>{date}</Text>
-                        </View>
-                      ) : null}
-                      {center ? (
-                        <View style={styles.groupMetaItem}>
-                          <Ionicons name="business-outline" size={12} color="#94A3B8" />
-                          <Text style={styles.groupMetaText} numberOfLines={1}>{center}</Text>
-                        </View>
-                      ) : null}
-                      {!date && !center ? (
-                        <Text style={styles.groupMetaText}>{formatDate(group.createdAt)}</Text>
-                      ) : null}
-                    </View>
-
-                    {ocrError ? (
-                      <Text style={styles.groupErrorText} numberOfLines={2}>{ocrError}</Text>
-                    ) : null}
-
-                    <View style={styles.groupPills}>
-                      <View style={[
-                        styles.pill,
-                        hasReceta ? styles.pillReceta : recetaPending ? styles.pillPending : styles.pillLocked
-                      ]}>
-                        <Ionicons
-                          name={recetaPending ? 'time-outline' : hasReceta ? 'document-text-outline' : 'lock-closed-outline'}
-                          size={11}
-                          color={hasReceta ? '#10B981' : recetaPending ? '#94A3B8' : '#CBD5E1'}
-                        />
-                        <Text style={[styles.pillText, hasReceta ? styles.pillTextReceta : recetaPending ? styles.pillTextPending : styles.pillTextLocked]}>
-                          Receta
-                        </Text>
-                      </View>
-
-                      <View style={[
-                        styles.pill,
-                        hasBono ? styles.pillBono : bonoPending ? styles.pillPending : styles.pillLocked
-                      ]}>
-                        <Ionicons
-                          name={bonoPending ? 'time-outline' : hasBono ? 'receipt-outline' : 'lock-closed-outline'}
-                          size={11}
-                          color={hasBono ? '#6366F1' : bonoPending ? '#94A3B8' : '#CBD5E1'}
-                        />
-                        <Text style={[styles.pillText, hasBono ? styles.pillTextBono : bonoPending ? styles.pillTextPending : styles.pillTextLocked]}>
-                          Bono
-                        </Text>
-                      </View>
-
-                      {canRetryGroupOcr(group) ? (
-                        <Pressable
-                          style={[styles.retryButton, retryingGroupIds[group.groupId] && { opacity: 0.6 }]}
-                          onPress={() => retryGroupOcr(group)}
-                          disabled={Boolean(retryingGroupIds[group.groupId])}
-                        >
-                          {retryingGroupIds[group.groupId] ? (
-                            <ActivityIndicator size="small" color="#1E3A8A" />
-                          ) : (
-                            <Ionicons name="refresh" size={13} color="#1E3A8A" />
-                          )}
-                        </Pressable>
-                      ) : null}
-                    </View>
+              <Pressable
+                key={`${group.groupId}-${type}`}
+                style={[styles.groupCard, isPending && styles.groupCardProcessing]}
+                onPress={() => { setDetailTab(type); setPreviewGroup(group); }}
+              >
+                <View style={styles.groupCardTop}>
+                  <View style={[styles.docTypeBadge, isPending
+                    ? { backgroundColor: '#F8FAFC', borderColor: '#E2E8F0' }
+                    : { backgroundColor: badgeBg, borderColor: badgeBorder }
+                  ]}>
+                    {isPending
+                      ? <ActivityIndicator size="small" color="#94A3B8" />
+                      : <Ionicons name={isReceta ? 'document-text' : 'receipt'} size={14} color={accentColor} />
+                    }
+                    <Text style={[styles.docTypeBadgeText, { color: isPending ? '#94A3B8' : accentColor }]}>
+                      {isPending ? 'Analizando documento...' : isReceta ? 'Receta' : 'Bono'}
+                    </Text>
                   </View>
+                  <View style={styles.groupActions}>
+                    <Pressable style={styles.iconButton} onPress={() => openEditTitle(group)}>
+                      <Ionicons name="create-outline" size={16} color="#0F172A" />
+                    </Pressable>
+                    <Pressable style={styles.iconButton} onPress={() => shareGroupRecipe(group, type)}>
+                      <Ionicons name="share-outline" size={16} color="#1E3A8A" />
+                    </Pressable>
+                    <Pressable style={styles.iconButtonDanger} onPress={() => confirmDeleteGroup(group)}>
+                      <Ionicons name="trash-outline" size={16} color="#DC2626" />
+                    </Pressable>
+                  </View>
+                </View>
+
+                <Text style={styles.groupTitle} numberOfLines={1}>
+                  {name || getGroupTitle(group)}
+                </Text>
+                {doctor ? <Text style={styles.groupDoctor} numberOfLines={1}>{doctor}</Text> : null}
+
+                <View style={styles.groupMeta}>
+                  {date ? (
+                    <View style={styles.groupMetaItem}>
+                      <Ionicons name="calendar-outline" size={12} color="#94A3B8" />
+                      <Text style={styles.groupMetaText}>{date}</Text>
+                    </View>
+                  ) : null}
+                  {center ? (
+                    <View style={styles.groupMetaItem}>
+                      <Ionicons name="business-outline" size={12} color="#94A3B8" />
+                      <Text style={styles.groupMetaText} numberOfLines={1}>{center}</Text>
+                    </View>
+                  ) : null}
+                  {!date && !center && !isPending ? (
+                    <Text style={styles.groupMetaText}>{formatDate(group.createdAt)}</Text>
+                  ) : null}
                 </View>
               </Pressable>
             );
@@ -1275,6 +1398,18 @@ export default function BibliotecaScreen() {
                   </Pressable>
 
                   {(() => {
+                    if (detailTab === 'bono') {
+                      const bonoParsed = previewGroup.items.map(i => i.bonoParsed).find(Boolean);
+                      const totalPagar = bonoParsed?.monto_a_pagar;
+                      return (
+                        <View style={styles.totalApproxCard}>
+                          <Text style={styles.totalApproxLabel}>A PAGAR</Text>
+                          <Text style={[styles.totalApproxValue, { color: '#FFFFFF' }]}>
+                            {totalPagar || 'S/P'}
+                          </Text>
+                        </View>
+                      );
+                    }
                     const priceLookup = getEffectivePriceLookup(previewGroup);
                     const totalApprox = computeMedicationTotalApprox(
                       getGroupStructuredData(previewGroup).medications,
@@ -1294,9 +1429,9 @@ export default function BibliotecaScreen() {
 
               <View style={styles.groupModalTextWrap}>
                 <View style={styles.modalTextHeader}>
-                  <Text style={styles.summaryLabel}>Texto completo de receta</Text>
+                  <Text style={styles.summaryLabel}>{detailTab === 'receta' ? 'Receta médica' : 'Bono'}</Text>
                   <View style={styles.modalActions}>
-                    {previewGroup ? (
+                    {previewGroup && detailTab === 'receta' ? (
                       <Pressable
                         style={styles.shareRecipeButton}
                         onPress={() => lookupGroupPrices(previewGroup)}
@@ -1310,7 +1445,7 @@ export default function BibliotecaScreen() {
                       </Pressable>
                     ) : null}
                     {previewGroup ? (
-                      <Pressable style={styles.shareRecipeButton} onPress={() => shareGroupRecipe(previewGroup)}>
+                      <Pressable style={styles.shareRecipeButton} onPress={() => shareGroupRecipe(previewGroup, detailTab)}>
                         <Ionicons name="share-outline" size={14} color="#1E3A8A" />
                         <Text style={styles.shareRecipeText}>Compartir</Text>
                       </Pressable>
@@ -1318,9 +1453,134 @@ export default function BibliotecaScreen() {
                   </View>
                 </View>
                 <ScrollView contentContainerStyle={styles.richContent}>
-                  {previewGroup ? (
+                  {previewGroup && detailTab === 'bono' ? (() => {
+                    const bonoParsed = previewGroup.items.map(i => i.bonoParsed).find(Boolean);
+                    const bonoStatus = previewGroup.items.find(i => i.bonoStatus)?.bonoStatus;
+                    if (bonoStatus === 'pending' && !bonoParsed) {
+                      return (
+                        <View style={styles.processingRow}>
+                          <ActivityIndicator size="small" color="#6366F1" />
+                          <Text style={styles.processingText}>Analizando bono...</Text>
+                        </View>
+                      );
+                    }
+                    if (!bonoParsed) {
+                      return (
+                        <View style={styles.bonoEmptyWrap}>
+                          <Ionicons name="receipt-outline" size={36} color="#CBD5E1" />
+                          <Text style={styles.bonoEmptyTitle}>Bono no escaneado</Text>
+                          <Text style={styles.bonoEmptyText}>Este grupo no tiene un bono. Agrega una foto del bono para analizarlo.</Text>
+                          <Pressable
+                            style={[styles.addPhotoBtn, { backgroundColor: '#6366F1' }]}
+                            onPress={() => previewGroup && addPhotoToGroup(previewGroup.groupId, 'bono')}
+                          >
+                            <Ionicons name="camera-outline" size={16} color="#FFFFFF" />
+                            <Text style={styles.addPhotoBtnText}>Agregar foto de bono</Text>
+                          </Pressable>
+                        </View>
+                      );
+                    }
+                    return (
+                      <>
+                        {bonoParsed.beneficiario_nombre ? (
+                          <View style={styles.sectionBlock}>
+                            <Text style={styles.sectionTitle}>Beneficiario</Text>
+                            <Text style={styles.sectionText}>{bonoParsed.beneficiario_nombre}</Text>
+                            {bonoParsed.beneficiario_rut ? <Text style={styles.sectionSubText}>RUT: {bonoParsed.beneficiario_rut}</Text> : null}
+                          </View>
+                        ) : null}
+                        {bonoParsed.profesional_nombre ? (
+                          <View style={styles.sectionBlock}>
+                            <Text style={styles.sectionTitle}>Profesional</Text>
+                            <Text style={styles.sectionText}>{bonoParsed.profesional_nombre}</Text>
+                            {bonoParsed.profesional_rut ? <Text style={styles.sectionSubText}>RUT: {bonoParsed.profesional_rut}</Text> : null}
+                          </View>
+                        ) : null}
+                        {bonoParsed.prestador_nombre ? (
+                          <View style={styles.sectionBlock}>
+                            <Text style={styles.sectionTitle}>Centro médico</Text>
+                            <Text style={styles.sectionText}>{bonoParsed.prestador_nombre}</Text>
+                          </View>
+                        ) : null}
+                        {(bonoParsed.fecha_atencion || bonoParsed.fecha_emision) ? (
+                          <View style={styles.sectionBlock}>
+                            <Text style={styles.sectionTitle}>Fechas</Text>
+                            {bonoParsed.fecha_atencion ? <Text style={styles.sectionText}>Atención: {bonoParsed.fecha_atencion}</Text> : null}
+                            {bonoParsed.fecha_emision ? <Text style={styles.sectionSubText}>Emisión: {bonoParsed.fecha_emision}</Text> : null}
+                          </View>
+                        ) : null}
+                        {bonoParsed.numero_bono ? (
+                          <View style={styles.sectionBlock}>
+                            <Text style={styles.sectionTitle}>N° Bono</Text>
+                            <Text style={styles.sectionText}>{bonoParsed.numero_bono}</Text>
+                          </View>
+                        ) : null}
+                        {bonoParsed.items && bonoParsed.items.length > 0 ? (
+                          <View style={styles.sectionBlock}>
+                            <Text style={styles.sectionTitle}>Prestaciones</Text>
+                            {bonoParsed.items.map((item, idx) => (
+                              <View key={idx} style={styles.bonoItem}>
+                                <Text style={styles.bonoItemDesc}>{item.descripcion || item.codigo}</Text>
+                                <View style={styles.bonoItemRow}>
+                                  {item.copago ? <Text style={styles.bonoItemDetail}>Copago: {item.copago}</Text> : null}
+                                  {item.valor_a_pagar ? <Text style={styles.bonoItemDetail}>A pagar: {item.valor_a_pagar}</Text> : null}
+                                  {item.bonificacion ? <Text style={styles.bonoItemDetail}>Bonif.: {item.bonificacion}</Text> : null}
+                                </View>
+                              </View>
+                            ))}
+                          </View>
+                        ) : null}
+                        {(bonoParsed.monto_total || bonoParsed.copago_total || bonoParsed.monto_a_pagar) ? (
+                          <View style={[styles.sectionBlock, styles.bonoTotalsBlock]}>
+                            <Text style={styles.sectionTitle}>Totales</Text>
+                            {bonoParsed.monto_total ? <Text style={styles.sectionText}>Total: {bonoParsed.monto_total}</Text> : null}
+                            {bonoParsed.bonificacion_total ? <Text style={styles.sectionSubText}>Bonificación: {bonoParsed.bonificacion_total}</Text> : null}
+                            {bonoParsed.copago_total ? <Text style={styles.sectionSubText}>Copago total: {bonoParsed.copago_total}</Text> : null}
+                            {bonoParsed.monto_a_pagar ? (
+                              <Text style={styles.bonoMontoPagar}>A pagar: {bonoParsed.monto_a_pagar}</Text>
+                            ) : null}
+                          </View>
+                        ) : null}
+                        {bonoParsed.provider ? (
+                          <View style={styles.sectionBlock}>
+                            <Text style={styles.sectionTitle}>Proveedor</Text>
+                            <Text style={styles.sectionText}>{bonoParsed.provider}</Text>
+                          </View>
+                        ) : null}
+                      </>
+                    );
+                  })() : null}
+                  {previewGroup && detailTab === 'receta' ? (
                     (() => {
+                      const recetaStatus = previewGroup.items.find(i => i.ocrStatus)?.ocrStatus;
+                      if (recetaStatus === 'pending') {
+                        return (
+                          <View style={styles.processingRow}>
+                            <ActivityIndicator size="small" color="#10B981" />
+                            <Text style={styles.processingText}>Analizando documento...</Text>
+                          </View>
+                        );
+                      }
                       const data = getGroupStructuredData(previewGroup);
+                      const hasRealRecetaData =
+                        data.medications.length > 0 ||
+                        Boolean(data.patient || data.doctor || data.institution);
+                      if (!hasRealRecetaData) {
+                        return (
+                          <View style={styles.bonoEmptyWrap}>
+                            <Ionicons name="document-text-outline" size={36} color="#CBD5E1" />
+                            <Text style={styles.bonoEmptyTitle}>Receta no escaneada</Text>
+                            <Text style={styles.bonoEmptyText}>Este grupo no tiene una receta médica. Agrega una foto de receta para analizarla.</Text>
+                            <Pressable
+                              style={styles.addPhotoBtn}
+                              onPress={() => previewGroup && addPhotoToGroup(previewGroup.groupId, 'receta')}
+                            >
+                              <Ionicons name="camera-outline" size={16} color="#FFFFFF" />
+                              <Text style={styles.addPhotoBtnText}>Agregar foto de receta</Text>
+                            </Pressable>
+                          </View>
+                        );
+                      }
                       const priceLookup = getEffectivePriceLookup(previewGroup);
                       const showMedicationSection =
                         data.medications.length > 0 ||
@@ -1520,9 +1780,10 @@ export default function BibliotecaScreen() {
                         </>
                       );
                     })()
-                  ) : (
+                  ) : null}
+                  {!previewGroup ? (
                     <Text style={styles.groupModalText}>[SIN_TEXTO]</Text>
-                  )}
+                  ) : null}
                 </ScrollView>
               </View>
             </View>
@@ -1576,7 +1837,7 @@ export default function BibliotecaScreen() {
 
             <View style={styles.previewImageWrap}>
               {previewPhoto ? (
-                <Image source={{ uri: previewPhoto.uri }} style={styles.previewImage} resizeMode="contain" />
+                <ZoomableImage key={previewPhoto.id} uri={previewPhoto.uri} />
               ) : null}
             </View>
           </SafeAreaView>
@@ -2722,5 +2983,158 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 15,
     fontWeight: '800',
+  },
+  groupCardTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  docTypeBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  docTypeBadgeText: {
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  groupCardProcessing: {
+    borderColor: '#DDD6FE',
+    backgroundColor: '#FAFAFF',
+  },
+  groupProcessingBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#EDE9FE',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginBottom: 10,
+  },
+  groupProcessingText: {
+    color: '#5B21B6',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  addPhotoBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#10B981',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    marginTop: 12,
+  },
+  addPhotoBtnText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  pillScan: { backgroundColor: '#EFF6FF', borderColor: '#BFDBFE' },
+  pillTextScan: { color: '#1E3A8A' },
+  detailTabBar: {
+    flexDirection: 'row',
+    marginHorizontal: 16,
+    marginTop: 8,
+    marginBottom: 4,
+    borderRadius: 14,
+    backgroundColor: '#F1F5F9',
+    padding: 3,
+    gap: 3,
+  },
+  detailTabBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    paddingVertical: 8,
+    borderRadius: 11,
+  },
+  detailTabBtnActive: {
+    backgroundColor: '#FFFFFF',
+    shadowColor: '#000',
+    shadowOpacity: 0.06,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 1,
+  },
+  detailTabText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#94A3B8',
+  },
+  detailTabTextActive: {
+    color: '#10B981',
+  },
+  detailTabTextActiveBono: {
+    color: '#6366F1',
+  },
+  bonoEmptyWrap: {
+    alignItems: 'center',
+    paddingVertical: 32,
+    gap: 8,
+  },
+  bonoEmptyTitle: {
+    color: '#475569',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  bonoEmptyText: {
+    color: '#94A3B8',
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 18,
+    paddingHorizontal: 16,
+  },
+  bonoItem: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 6,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  bonoItemDesc: {
+    color: '#0F172A',
+    fontSize: 13,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  bonoItemRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  bonoItemDetail: {
+    color: '#475569',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  bonoTotalsBlock: {
+    backgroundColor: '#F0FDF4',
+    borderWidth: 1,
+    borderColor: '#BBF7D0',
+    borderRadius: 12,
+    padding: 12,
+  },
+  bonoMontoPagar: {
+    color: '#059669',
+    fontSize: 16,
+    fontWeight: '900',
+    marginTop: 4,
+  },
+  sectionSubText: {
+    color: '#64748B',
+    fontSize: 13,
+    fontWeight: '500',
+    marginTop: 2,
   },
 });

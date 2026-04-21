@@ -11,7 +11,8 @@ interface AudioAiQueryResult {
   model: string;
 }
 
-const apiBaseUrl = process.env.EXPO_PUBLIC_TRANSCRIBE_API_URL;
+const PRODUCTION_API_URL = 'https://media-hub-production.up.railway.app';
+const apiBaseUrl = process.env.EXPO_PUBLIC_TRANSCRIBE_API_URL || PRODUCTION_API_URL;
 const audioAiEnabled = process.env.EXPO_PUBLIC_AUDIO_AI_ENABLED === 'true';
 
 export function isAudioAiEnabledOnClient() {
@@ -23,9 +24,6 @@ export async function queryAudioWithAi({
   prompt,
   durationMillis,
 }: AudioAiQueryArgs): Promise<AudioAiQueryResult> {
-  if (!apiBaseUrl) {
-    throw new Error('Missing EXPO_PUBLIC_TRANSCRIBE_API_URL.');
-  }
   if (!audioAiEnabled) {
     throw new Error('Audio AI feature is disabled.');
   }

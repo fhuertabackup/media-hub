@@ -6,6 +6,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { getAppSettings } from '../../src/lib/settings-store';
 import { SoftScreenGradient } from '../../src/components/SoftScreenGradient';
 
+const APP_VERSION = '1.1.0';
+
 export default function HomeScreen() {
   const router = useRouter();
   const [userName, setUserName] = useState('');
@@ -42,6 +44,8 @@ export default function HomeScreen() {
             {userName || 'Usuario'}
           </Text>
           <Text style={styles.welcomeHint}>Selecciona una opción para comenzar</Text>
+
+          <Text style={styles.versionText}>v{APP_VERSION}</Text>
 
           <Pressable style={styles.mainButton} onPress={() => router.push('/(tabs)/biblioteca')}>
             <View style={[styles.iconWrap, { backgroundColor: '#D1FAE5' }]}>
@@ -168,5 +172,11 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     marginTop: 4,
+  },
+  versionText: {
+    color: '#CBD5E1',
+    fontSize: 12,
+    fontWeight: '500',
+    marginBottom: 16,
   },
 });
