@@ -263,18 +263,61 @@ export async function getBonosHistory(deviceId, limit = 50) {
 export async function getUsageSummary(deviceId) {
   if (!pool || !deviceId) return null;
   try {
-    const { rows } = await pool.query(
-      `SELECT 
-         (SELECT COUNT(*) FROM recetas WHERE device_id = $1) as total_recetas,
-         (SELECT COUNT(*) FROM bonos WHERE device_id = $1) as total_bonos,
-         (SELECT COUNT(*) FROM usage WHERE device_id = $1 AND action = 'transcripcion') as total_transcripciones,
-         (SELECT MIN(created_at) FROM recetas WHERE device_id = $1) as first_receta_at,
-         (SELECT MAX(created_at) FROM recetas WHERE device_id = $1) as last_receta_at`,
+    // 1. Get user plan and limits
+    const { rows: planRows } = await pool.query(
+      `SELECT p.name as plan_name, p.max_recetas_month, p.max_bonos_month, p.max_transcriptions_month
+       FROM users u JOIN plans p ON u.plan = p.name
+       WHERE u.device_id = $1`,
       [deviceId]
     );
-    return rows[0] || null;
+
+    // If user doesn't exist yet, they are implicitly 'free'
+    const limits = planRows[0] || { 
+      plan_name: 'free', 
+      max_recetas_month: 10, 
+      max_bonos_month: 10, 
+      max_transcriptions_month: 20 
+    };
+
+    // 2. Get monthly usage counts
+    const { rows: usageRows } = await pool.query(
+      `SELECT action, COUNT(*) as count 
+       FROM usage
+       WHERE device_id = $1 
+         AND created_at >= date_trunc('month', NOW())
+       GROUP BY action`,
+      [deviceId]
+    );
+
+    const usageMap = {
+      receta: 0,
+      bono: 0,
+      transcripcion: 0
+    };
+    usageRows.forEach(r => {
+      usageMap[r.action] = parseInt(r.count, 10);
+    });
+
+    return {
+      plan: limits.plan_name,
+      usage: {
+        receta: {
+          used: usageMap.receta,
+          max: limits.max_recetas_month
+        },
+        bono: {
+          used: usageMap.bono,
+          max: limits.max_bonos_month
+        },
+        transcripcion: {
+          used: usageMap.transcripcion,
+          max: limits.max_transcriptions_month
+        }
+      }
+    };
   } catch (err) {
     console.error('[db] getUsageSummary error', err.message);
     return null;
   }
 }
+

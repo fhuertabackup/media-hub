@@ -43,6 +43,7 @@ import {
   FonasaPharmacyDetail,
 } from '../../src/lib/fonasa-price-api';
 import { extractMedicationNames } from '../../src/lib/medication-extract-api';
+import { fetchUsageStats, checkUsageLimit, UsageStats } from '../../src/lib/usage-api';
 import { SectionHeaderBanner } from '../../src/components/SectionHeaderBanner';
 import { SoftScreenGradient } from '../../src/components/SoftScreenGradient';
 import { PhotoItem } from '../../src/types/media';
@@ -298,6 +299,7 @@ export default function BibliotecaScreen() {
   const [retryingGroupIds, setRetryingGroupIds] = useState<Record<string, boolean>>({});
   const [rawOcrExpandedByGroup, setRawOcrExpandedByGroup] = useState<Record<string, boolean>>({});
   const [priceLookupByGroup, setPriceLookupByGroup] = useState<Record<string, GroupPriceLookupState>>({});
+  const [usage, setUsage] = useState<UsageStats | null>(null);
   const [priceDetailModal, setPriceDetailModal] = useState<{
     open: boolean;
     loading: boolean;
@@ -325,10 +327,20 @@ export default function BibliotecaScreen() {
     }
   }, []);
 
+  const loadUsage = useCallback(async () => {
+    try {
+      const stats = await fetchUsageStats();
+      if (stats) setUsage(stats);
+    } catch (error) {
+      console.error('[loadUsage] error', error);
+    }
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
       loadPhotos();
-    }, [loadPhotos])
+      loadUsage();
+    }, [loadPhotos, loadUsage])
   );
 
   const groupedPhotos = useMemo<PhotoGroup[]>(() => {
@@ -663,8 +675,9 @@ export default function BibliotecaScreen() {
       const message = error instanceof Error ? error.message : 'No se pudo extraer texto.';
       if (error instanceof Error && message.includes('Límite')) {
         await updateMediaItem(photo.id, { ocrStatus: 'error', ocrError: message });
-        await deleteMediaItem(photo.id);
+        await deleteMediaItem(photo.id); // Valid since deleteMediaItem now handles IDs
         await loadPhotos();
+        await loadUsage();
         showLimitError(message, 'Contacta soporte para ampliar tu plan.');
         return;
       }
@@ -687,8 +700,9 @@ export default function BibliotecaScreen() {
       const message = error instanceof Error ? error.message : 'No se pudo analizar bono.';
       if (error instanceof Error && message.includes('Límite')) {
         await updateMediaItem(photo.id, { bonoStatus: 'error', bonoError: message });
-        await deleteMediaItem(photo.id);
+        await deleteMediaItem(photo.id); // Valid since deleteMediaItem now handles IDs
         await loadPhotos();
+        await loadUsage();
         showLimitError(message, 'Contacta soporte para ampliar tu plan.');
         return;
       }
@@ -747,6 +761,18 @@ export default function BibliotecaScreen() {
     }
 
     try {
+      // Pre-check limits before doing anything
+      const canReceta = await checkUsageLimit('receta');
+      const canBono = await checkUsageLimit('bono');
+      
+      if (!canReceta || !canBono) {
+        showLimitError(
+          'Límite de documentos alcanzado',
+          'Tu plan actual no permite agregar más documentos este mes. Contacta soporte para ampliar tu plan.'
+        );
+        return;
+      }
+
       setSavingGroup(true);
       const groupId = sessionGroupId || generateId();
       const baseCount = photos.length;
@@ -777,18 +803,66 @@ export default function BibliotecaScreen() {
       setSessionGroupId('');
       await loadPhotos();
 
+      let limitReached = false;
       for (const item of createdItems) {
-        await runPhotoOcr(item);
-        await loadPhotos();
-        await runBonoAnalyze(item);
-        await loadPhotos();
+        if (limitReached) {
+          await deleteMediaItem(item.id);
+          continue;
+        }
+        try {
+          // Process OCR (Recipe check)
+          await runPhotoOcr(item);
+          
+          // Process Bono check
+          await runBonoAnalyze(item);
+          
+          // STRICT VALIDATION: Check if it's either a Receta or a Bono
+          const all = await getAllMedia();
+          const updatedItem = all.find(i => i.id === item.id) as PhotoItem;
+          
+          const hasRecetaData = updatedItem?.ocrParsed && 
+            (updatedItem.ocrParsed.medications?.length > 0 || updatedItem.ocrParsed.patientName);
+          
+          const hasBonoData = updatedItem?.bonoParsed && 
+            (updatedItem.bonoParsed.correlativo || updatedItem.bonoParsed.monto_total);
+
+          if (!hasRecetaData && !hasBonoData) {
+            await deleteMediaItem(item.id);
+            await loadPhotos();
+            Alert.alert(
+              'Documento rechazado', 
+              'El documento analizado no parece ser una receta médica ni un bono de atención. Solo se permiten estos tipos de documentos.'
+            );
+            continue; // Move to next item or finish
+          }
+
+          await loadPhotos();
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : '';
+          if (errMsg.includes('Límite')) {
+            limitReached = true;
+            for (const remainingItem of createdItems) {
+              await deleteMediaItem(remainingItem.id);
+            }
+          } else {
+            console.error('Error processing photo:', err);
+          }
+        }
       }
-      await autoGenerateGroupTitle(groupId);
-      await loadPhotos();
-      Alert.alert('Evento guardado', `Se guardaron ${createdItems.length} fotos.`);
+      if (!limitReached) {
+        try {
+          await autoGenerateGroupTitle(groupId);
+          await loadPhotos();
+        } catch (err) {
+          console.error('Error generating title:', err);
+        }
+      }
     } catch (error) {
       console.error(error);
-      Alert.alert('Error', 'No se pudo guardar el evento de fotos.');
+      const message = error instanceof Error ? error.message : '';
+      if (!message.includes('Límite')) {
+        Alert.alert('Error', 'No se pudo guardar el evento de fotos.');
+      }
     } finally {
       setSavingGroup(false);
     }
@@ -1247,7 +1321,11 @@ export default function BibliotecaScreen() {
         <View style={styles.headerWrap}>
           <SectionHeaderBanner
             title="Documento médico"
-            subtitle={`${photos.length} foto${photos.length !== 1 ? 's' : ''} guardada${photos.length !== 1 ? 's' : ''}`}
+            subtitle={
+              usage 
+                ? `Plan ${usage.plan.toUpperCase()} · Recetas: ${usage.usage.receta.used}/${usage.usage.receta.max} · Bonos: ${usage.usage.bono.used}/${usage.usage.bono.max}`
+                : `${photos.length} foto${photos.length !== 1 ? 's' : ''} guardada${photos.length !== 1 ? 's' : ''}`
+            }
             icon="images"
             color="#312E81"
             actionLabel="Agregar foto"

@@ -54,16 +54,31 @@ export async function updateMediaItem(itemId: string, updates: Partial<MediaItem
   await saveAllMedia(next);
 }
 
-export async function deleteMediaItem(item: MediaItem) {
-  const items = await getAllMedia();
-  const next = items.filter((current) => current.id !== item.id);
-  await saveAllMedia(next);
+export async function deleteMediaItem(itemOrId: MediaItem | string) {
+  try {
+    const items = await getAllMedia();
+    const id = typeof itemOrId === 'string' ? itemOrId : itemOrId.id;
+    const targetItem = typeof itemOrId === 'string' ? items.find((i) => i.id === id) : itemOrId;
 
-  const fileInfo = await FileSystem.getInfoAsync(item.uri);
-  if (fileInfo.exists) {
-    await FileSystem.deleteAsync(item.uri, { idempotent: true });
+    const next = items.filter((current) => current.id !== id);
+    await saveAllMedia(next);
+
+    if (targetItem && 'uri' in targetItem && targetItem.uri) {
+      try {
+        const fileInfo = await FileSystem.getInfoAsync(targetItem.uri);
+        if (fileInfo.exists) {
+          await FileSystem.deleteAsync(targetItem.uri, { idempotent: true });
+        }
+      } catch (e) {
+        console.warn('[media-store] Could not delete physical file:', targetItem.uri, e);
+      }
+    }
+  } catch (err) {
+    console.error('[media-store] Error in deleteMediaItem:', err);
+    throw err;
   }
 }
+
 
 export async function copyPhotoToAppStorage(sourceUri: string, fileName: string) {
   await ensureStorage();

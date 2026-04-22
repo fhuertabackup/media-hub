@@ -62,6 +62,25 @@ app.get('/health', (_req, res) => {
   });
 });
 
+app.get('/api/usage/stats', async (req, res) => {
+  try {
+    const deviceId = req.headers['x-device-id'] || null;
+    if (!deviceId) {
+      return res.status(400).json({ error: 'x-device-id header is required' });
+    }
+    const stats = await getUsageSummary(deviceId);
+    if (!stats) {
+      return res.status(404).json({ error: 'Stats not found' });
+    }
+    return res.json(stats);
+  } catch (error) {
+    console.error('usage stats error', error);
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : 'Unknown server error',
+    });
+  }
+});
+
 app.post('/api/transcriptions', upload.single('audio'), async (req, res) => {
   try {
     const file = req.file;
