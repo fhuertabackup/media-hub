@@ -201,6 +201,8 @@ export default function AudioScreen() {
       console.error(error);
       const message = error instanceof Error ? error.message : 'No se pudo transcribir el audio.';
       if (error instanceof Error && message.includes('Límite')) {
+        await deleteMediaItem(item.id);
+        await loadItems({ showLoader: false });
         showLimitError(message, 'Contacta soporte para ampliar tu plan.');
       } else {
         const elapsed = Date.now() - startedAt;

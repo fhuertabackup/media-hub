@@ -662,6 +662,9 @@ export default function BibliotecaScreen() {
       console.error(error);
       const message = error instanceof Error ? error.message : 'No se pudo extraer texto.';
       if (error instanceof Error && message.includes('Límite')) {
+        await updateMediaItem(photo.id, { ocrStatus: 'error', ocrError: message });
+        await deleteMediaItem(photo.id);
+        await loadPhotos();
         showLimitError(message, 'Contacta soporte para ampliar tu plan.');
         return;
       }
@@ -683,6 +686,9 @@ export default function BibliotecaScreen() {
       console.error(error);
       const message = error instanceof Error ? error.message : 'No se pudo analizar bono.';
       if (error instanceof Error && message.includes('Límite')) {
+        await updateMediaItem(photo.id, { bonoStatus: 'error', bonoError: message });
+        await deleteMediaItem(photo.id);
+        await loadPhotos();
         showLimitError(message, 'Contacta soporte para ampliar tu plan.');
         return;
       }
