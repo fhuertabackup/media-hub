@@ -47,7 +47,11 @@ export async function ocrPhoto({ uri }: OcrPhotoArgs): Promise<OcrPhotoResult> {
   const data = await response.json().catch(() => null);
   if (!response.ok) {
     const message = data?.error ?? 'Photo OCR request failed.';
-    throw new Error(message);
+    const err = new Error(message);
+    if (message.includes('Límite')) {
+      err.code = 'LIMIT_EXCEEDED';
+    }
+    throw err;
   }
 
   if (!data?.text || typeof data.text !== 'string') {

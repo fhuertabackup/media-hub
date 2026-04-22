@@ -42,7 +42,11 @@ export async function analyzeBonoPhoto({ uri }: BonoPhotoArgs): Promise<BonoPhot
   const data = await response.json().catch(() => null);
   if (!response.ok) {
     const message = data?.error ?? 'Bono analyze request failed.';
-    throw new Error(message);
+    const err = new Error(message);
+    if (message.includes('Límite')) {
+      err.code = 'LIMIT_EXCEEDED';
+    }
+    throw err;
   }
 
   return {

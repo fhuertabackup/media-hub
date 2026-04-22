@@ -3,7 +3,7 @@ import { Pressable, StatusBar, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { getAppSettings } from '../../src/lib/settings-store';
+import { getAppSettings, getDeviceId } from '../../src/lib/settings-store';
 import { SoftScreenGradient } from '../../src/components/SoftScreenGradient';
 
 const APP_VERSION = '1.1.0';
@@ -11,12 +11,14 @@ const APP_VERSION = '1.1.0';
 export default function HomeScreen() {
   const router = useRouter();
   const [userName, setUserName] = useState('');
+  const [deviceId, setDeviceId] = useState('');
 
   useFocusEffect(
     useCallback(() => {
       (async () => {
         const settings = await getAppSettings();
         setUserName(settings.personName.trim());
+        setDeviceId(settings.deviceId || '');
       })();
     }, [])
   );
@@ -46,6 +48,11 @@ export default function HomeScreen() {
           <Text style={styles.welcomeHint}>Selecciona una opción para comenzar</Text>
 
           <Text style={styles.versionText}>v{APP_VERSION}</Text>
+          {deviceId ? (
+            <Text style={styles.deviceIdText} numberOfLines={1}>
+              ID: {deviceId}
+            </Text>
+          ) : null}
 
           <Pressable style={styles.mainButton} onPress={() => router.push('/(tabs)/biblioteca')}>
             <View style={[styles.iconWrap, { backgroundColor: '#D1FAE5' }]}>
@@ -177,6 +184,11 @@ const styles = StyleSheet.create({
     color: '#CBD5E1',
     fontSize: 12,
     fontWeight: '500',
+    marginBottom: 2,
+  },
+  deviceIdText: {
+    color: '#94A3B8',
+    fontSize: 9,
     marginBottom: 16,
   },
 });

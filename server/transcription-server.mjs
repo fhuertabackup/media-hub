@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import cors from 'cors';
 import express from 'express';
-import { setupDb, checkAndRecord } from './db.mjs';
+import { setupDb, checkAndRecord, saveReceta, saveBono, getRecetasHistory, getBonosHistory, getUsageSummary } from './db.mjs';
 import multer from 'multer';
 import ffmpegStatic from 'ffmpeg-static';
 import { randomUUID } from 'node:crypto';
@@ -330,9 +330,13 @@ app.post('/api/photos/ocr', upload.single('photo'), async (req, res) => {
     }
 
     const ocr = data?.ocr ?? {};
+    const parsed = ocr.parsed ?? null;
+    if (parsed) {
+      await saveReceta(deviceId, { ...parsed, rawText: ocr.text });
+    }
     return res.json({
       text: ocr.text ?? '',
-      parsed: ocr.parsed ?? null,
+      parsed,
       model: ocr.model ?? '',
       candidates: data?.candidates ?? [],
       vademecumMatches: data?.vademecumMatches ?? [],
@@ -380,9 +384,13 @@ app.post('/api/bonos/analyze', upload.single('photo'), async (req, res) => {
     }
 
     const ocr = data?.ocr ?? {};
+    const parsed = ocr.parsed ?? null;
+    if (parsed) {
+      await saveBono(deviceId, { ...parsed, raw_text: ocr.text });
+    }
     return res.json({
       text: ocr.text ?? '',
-      parsed: ocr.parsed ?? null,
+      parsed,
       model: ocr.model ?? '',
       saved: data?.saved ?? null,
     });
@@ -993,4 +1001,33 @@ function normalizeFonasaDetail(data) {
     return aDist - bDist;
   });
 }
+
+app.get('/api/recetas/history', async (req, res) => {
+  const deviceId = req.headers['x-device-id'] || null;
+  if (!deviceId) {
+    return res.status(400).json({ error: 'device_id is required' });
+  }
+  const limit = parseInt(req.query.limit) || 50;
+  const history = await getRecetasHistory(deviceId, limit);
+  res.json({ history });
+});
+
+app.get('/api/bonos/history', async (req, res) => {
+  const deviceId = req.headers['x-device-id'] || null;
+  if (!deviceId) {
+    return res.status(400).json({ error: 'device_id is required' });
+  }
+  const limit = parseInt(req.query.limit) || 50;
+  const history = await getBonosHistory(deviceId, limit);
+  res.json({ history });
+});
+
+app.get('/api/stats/summary', async (req, res) => {
+  const deviceId = req.headers['x-device-id'] || null;
+  if (!deviceId) {
+    return res.status(400).json({ error: 'device_id is required' });
+  }
+  const summary = await getUsageSummary(deviceId);
+  res.json({ summary });
+});
 

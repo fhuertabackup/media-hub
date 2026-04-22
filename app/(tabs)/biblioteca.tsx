@@ -17,8 +17,8 @@ import {
 import * as Sharing from 'expo-sharing';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { GestureDetector, Gesture } from 'react-native-gesture-handler';
-import Animated, { useSharedValue, useAnimatedStyle, withTiming } from 'react-native-reanimated';
+import { GestureDetector, Gesture, GestureHandlerRootView } from 'react-native-gesture-handler';
+import Animated, { useSharedValue, useAnimatedStyle, withTiming, withSpring } from 'react-native-reanimated';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
@@ -33,6 +33,7 @@ import {
   updateMediaItem,
 } from '../../src/lib/media-store';
 import { generatePhotoGroupTitle, ocrPhoto } from '../../src/lib/photo-ocr-api';
+import { useLimitError } from '../../src/context/LimitErrorContext';
 import { analyzeBonoPhoto } from '../../src/lib/bono-api';
 import {
   lookupFonasaPrices,
@@ -206,33 +207,69 @@ function computeMedicationTotalApprox(medications: MedicationEntry[], lookup?: G
 function ZoomableImage({ uri }: { uri: string }) {
   const scale = useSharedValue(1);
   const savedScale = useSharedValue(1);
+  const translateX = useSharedValue(0);
+  const translateY = useSharedValue(0);
+  const savedTranslateX = useSharedValue(0);
+  const savedTranslateY = useSharedValue(0);
 
   const pinch = Gesture.Pinch()
     .onUpdate((e) => {
-      scale.value = Math.max(1, savedScale.value * e.scale);
+      scale.value = Math.max(1, Math.min(savedScale.value * e.scale, 5));
     })
     .onEnd(() => {
       savedScale.value = scale.value;
+      // si vuelve a escala 1, resetear posición
+      if (scale.value <= 1) {
+        translateX.value = withSpring(0);
+        translateY.value = withSpring(0);
+        savedTranslateX.value = 0;
+        savedTranslateY.value = 0;
+      }
+    });
+
+  const pan = Gesture.Pan()
+    .onUpdate((e) => {
+      translateX.value = savedTranslateX.value + e.translationX;
+      translateY.value = savedTranslateY.value + e.translationY;
+    })
+    .onEnd(() => {
+      savedTranslateX.value = translateX.value;
+      savedTranslateY.value = translateY.value;
     });
 
   const doubleTap = Gesture.Tap()
     .numberOfTaps(2)
     .onEnd(() => {
-      scale.value = withTiming(1);
-      savedScale.value = 1;
+      if (scale.value > 1) {
+        scale.value = withTiming(1);
+        savedScale.value = 1;
+        translateX.value = withSpring(0);
+        translateY.value = withSpring(0);
+        savedTranslateX.value = 0;
+        savedTranslateY.value = 0;
+      } else {
+        scale.value = withTiming(2.5);
+        savedScale.value = 2.5;
+      }
     });
 
   const animatedStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: scale.value }],
+    transform: [
+      { translateX: translateX.value },
+      { translateY: translateY.value },
+      { scale: scale.value },
+    ],
   }));
 
   return (
-    <GestureDetector gesture={Gesture.Simultaneous(pinch, doubleTap)}>
-      <Animated.Image
-        source={{ uri }}
-        style={[{ width: '100%', height: '100%' }, animatedStyle]}
-        resizeMode="contain"
-      />
+    <GestureDetector gesture={Gesture.Simultaneous(pinch, pan, doubleTap)}>
+      <Animated.View style={{ flex: 1, width: '100%' }}>
+        <Animated.Image
+          source={{ uri }}
+          style={[StyleSheet.absoluteFill, animatedStyle]}
+          resizeMode="contain"
+        />
+      </Animated.View>
     </GestureDetector>
   );
 }
@@ -255,6 +292,8 @@ export default function BibliotecaScreen() {
 
   const [addToGroup, setAddToGroup] = useState<{ groupId: string; type: 'receta' | 'bono' } | null>(null);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
+
+  const { showLimitError } = useLimitError();
   const [editingTitle, setEditingTitle] = useState('');
   const [retryingGroupIds, setRetryingGroupIds] = useState<Record<string, boolean>>({});
   const [rawOcrExpandedByGroup, setRawOcrExpandedByGroup] = useState<Record<string, boolean>>({});
@@ -622,9 +661,13 @@ export default function BibliotecaScreen() {
     } catch (error) {
       console.error(error);
       const message = error instanceof Error ? error.message : 'No se pudo extraer texto.';
+      if (error instanceof Error && message.includes('Límite')) {
+        showLimitError(message, 'Contacta soporte para ampliar tu plan.');
+        return;
+      }
       await updateMediaItem(photo.id, { ocrStatus: 'error', ocrError: message });
     }
-  }, [loadPhotos]);
+  }, [loadPhotos, showLimitError]);
 
   const runBonoAnalyze = useCallback(async (photo: PhotoItem) => {
     try {
@@ -639,9 +682,13 @@ export default function BibliotecaScreen() {
     } catch (error) {
       console.error(error);
       const message = error instanceof Error ? error.message : 'No se pudo analizar bono.';
+      if (error instanceof Error && message.includes('Límite')) {
+        showLimitError(message, 'Contacta soporte para ampliar tu plan.');
+        return;
+      }
       await updateMediaItem(photo.id, { bonoStatus: 'error', bonoError: message });
     }
-  }, [loadPhotos]);
+  }, [loadPhotos, showLimitError]);
 
   const autoGenerateGroupTitle = useCallback(
     async (groupId: string) => {
@@ -1826,22 +1873,24 @@ export default function BibliotecaScreen() {
       </Modal>
 
       <Modal visible={previewPhoto !== null} animationType="fade" transparent>
-        <View style={styles.previewBackdrop}>
-          <SafeAreaView style={styles.previewSafe}>
-            <View style={styles.previewTopRow}>
-              <Text style={styles.previewTitle} numberOfLines={1}>{previewPhoto?.title}</Text>
-              <Pressable style={styles.previewCloseBtn} onPress={() => setPreviewPhoto(null)}>
-                <Ionicons name="close" size={26} color="#FFFFFF" />
-              </Pressable>
-            </View>
+        <GestureHandlerRootView style={{ flex: 1 }}>
+          <View style={styles.previewBackdrop}>
+            <SafeAreaView style={styles.previewSafe}>
+              <View style={styles.previewTopRow}>
+                <Text style={styles.previewTitle} numberOfLines={1}>{previewPhoto?.title}</Text>
+                <Pressable style={styles.previewCloseBtn} onPress={() => setPreviewPhoto(null)}>
+                  <Ionicons name="close" size={26} color="#FFFFFF" />
+                </Pressable>
+              </View>
 
-            <View style={styles.previewImageWrap}>
-              {previewPhoto ? (
-                <ZoomableImage key={previewPhoto.id} uri={previewPhoto.uri} />
-              ) : null}
-            </View>
-          </SafeAreaView>
-        </View>
+              <View style={styles.previewImageWrap}>
+                {previewPhoto ? (
+                  <ZoomableImage key={previewPhoto.id} uri={previewPhoto.uri} />
+                ) : null}
+              </View>
+            </SafeAreaView>
+          </View>
+        </GestureHandlerRootView>
       </Modal>
 
       <Modal visible={priceDetailModal.open} animationType="slide" transparent>

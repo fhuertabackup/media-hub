@@ -36,6 +36,7 @@ import {
   enrichTranscript,
   transcribeAudio,
 } from '../../src/lib/transcription-api';
+import { useLimitError } from '../../src/context/LimitErrorContext';
 import { AudioItem } from '../../src/types/media';
 import { formatDate, formatDuration, generateId } from '../../src/utils/format';
 
@@ -45,6 +46,8 @@ export default function AudioScreen() {
   const [recordVisible, setRecordVisible] = useState(false);
   const [transcribingIds, setTranscribingIds] = useState<Record<string, boolean>>({});
   const [previewTranscript, setPreviewTranscript] = useState<AudioItem | null>(null);
+
+  const { showLimitError } = useLimitError();
 
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const recorderState = useAudioRecorderState(recorder);
@@ -197,14 +200,18 @@ export default function AudioScreen() {
     } catch (error) {
       console.error(error);
       const message = error instanceof Error ? error.message : 'No se pudo transcribir el audio.';
-      const elapsed = Date.now() - startedAt;
-      await updateMediaItem(item.id, {
-        transcriptStatus: 'error',
-        transcriptError: message,
-        transcriptionElapsedMs: elapsed,
-      });
-      await loadItems({ showLoader: false });
-      Alert.alert('Transcripción fallida', message);
+      if (error instanceof Error && message.includes('Límite')) {
+        showLimitError(message, 'Contacta soporte para ampliar tu plan.');
+      } else {
+        const elapsed = Date.now() - startedAt;
+        await updateMediaItem(item.id, {
+          transcriptStatus: 'error',
+          transcriptError: message,
+          transcriptionElapsedMs: elapsed,
+        });
+        await loadItems({ showLoader: false });
+        Alert.alert('Transcripción fallida', message);
+      }
     } finally {
       setTranscribingIds((prev) => ({ ...prev, [item.id]: false }));
     }

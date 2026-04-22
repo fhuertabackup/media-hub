@@ -48,7 +48,11 @@ export async function transcribeAudio({ uri, durationMillis }: TranscribeArgs): 
   const data = await response.json().catch(() => null);
   if (!response.ok) {
     const message = data?.error ?? 'Transcription request failed.';
-    throw new Error(message);
+    const err = new Error(message);
+    if (message.includes('Límite')) {
+      err.code = 'LIMIT_EXCEEDED';
+    }
+    throw err;
   }
 
   if (!data?.transcript || typeof data.transcript !== 'string') {
