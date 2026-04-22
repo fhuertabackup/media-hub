@@ -15,9 +15,10 @@ const { width } = Dimensions.get('window');
 
 interface InitialLoadingScreenProps {
   message?: string;
+  minimal?: boolean;
 }
 
-export function InitialLoadingScreen({ message = 'Iniciando...' }: InitialLoadingScreenProps) {
+export function InitialLoadingScreen({ message, minimal = false }: InitialLoadingScreenProps) {
   const pulseScale = useSharedValue(1);
   const pulseOpacity = useSharedValue(0.6);
 
@@ -60,22 +61,26 @@ export function InitialLoadingScreen({ message = 'Iniciando...' }: InitialLoadin
           </View>
         </View>
 
-        <Animated.View entering={FadeIn.delay(300).duration(800)} style={styles.textContainer}>
-          <Text style={styles.title}>Salud Hub</Text>
-          <Text style={styles.subtitle}>{message}</Text>
-          
-          <View style={styles.progressBarBg}>
-            <Animated.View 
-              entering={FadeIn.delay(500)}
-              style={styles.progressBarFill} 
-            />
-          </View>
-        </Animated.View>
+        {!minimal && (
+          <Animated.View entering={FadeIn.delay(300).duration(800)} style={styles.textContainer}>
+            <Text style={styles.title}>Salud Hub</Text>
+            {message && <Text style={styles.subtitle}>{message}</Text>}
+            
+            <View style={styles.progressBarBg}>
+              <Animated.View 
+                entering={FadeIn.delay(500)}
+                style={styles.progressBarFill} 
+              />
+            </View>
+          </Animated.View>
+        )}
       </View>
 
-      <View style={styles.footer}>
-        <Text style={styles.footerText}>Preparando tu experiencia médica...</Text>
-      </View>
+      {!minimal && (
+        <View style={styles.footer}>
+          <Text style={styles.footerText}>Preparando tu experiencia médica...</Text>
+        </View>
+      )}
     </View>
   );
 }

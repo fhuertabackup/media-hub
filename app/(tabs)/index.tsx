@@ -38,7 +38,7 @@ export default function HomeScreen() {
         <View style={styles.centerBlock}>
           <View style={styles.heroMedical}>
             <View style={styles.heroMedicalInner}>
-              <Ionicons name="medkit" size={40} color="#1E3A8A" />
+              <Ionicons name="medical" size={56} color="#FFFFFF" />
             </View>
           </View>
           <Text style={styles.greeting}>{greeting}</Text>
@@ -110,12 +110,17 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   heroMedicalInner: {
-    width: 72,
-    height: 72,
+    width: 82,
+    height: 82,
     borderRadius: 999,
-    backgroundColor: '#DBEAFE',
+    backgroundColor: '#6366F1', // Indigo to match loading screen
     alignItems: 'center',
     justifyContent: 'center',
+    shadowColor: '#6366F1',
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 8,
   },
   welcomeTextWrap: {
     alignItems: 'center',

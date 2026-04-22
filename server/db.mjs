@@ -154,7 +154,10 @@ export async function checkAndRecord(deviceId, action) {
 }
 
 export async function saveReceta(deviceId, data) {
-  if (!pool || !deviceId) return;
+  if (!pool || !deviceId) {
+    console.log('[db] saveReceta skipped: no pool or deviceId', { deviceId });
+    return;
+  }
   if (!data) return;
   try {
     await pool.query(
@@ -165,23 +168,26 @@ export async function saveReceta(deviceId, data) {
         deviceId,
         data.photoUri || null,
         data.rawText || data.raw_text || '',
-        data.institution || null,
-        data.doctorName || data.doctor_name || null,
-        data.doctorLicense || data.doctor_license || null,
-        data.patientName || data.patient_name || null,
-        data.date || data.prescription_date || null,
-        data.indicationsGeneral || data.indications || null,
+        data.institution || data.institucion || null,
+        data.doctorName || data.doctor_name || data.medico || null,
+        data.doctorLicense || data.doctor_license || data.registro || null,
+        data.patientName || data.patient_name || data.paciente || null,
+        data.date || data.prescription_date || data.fecha || null,
+        data.indicationsGeneral || data.indications || data.indicaciones || null,
         JSON.stringify(data.medications || [])
       ]
     );
-    console.log('[db] receta saved for device', deviceId);
+    console.log('[db] receta saved successfully for device', deviceId);
   } catch (err) {
-    console.error('[db] saveReceta error', err.message);
+    console.error('[db] saveReceta ERROR:', err.message);
   }
 }
 
 export async function saveBono(deviceId, data) {
-  if (!pool || !deviceId) return;
+  if (!pool || !deviceId) {
+    console.log('[db] saveBono skipped: no pool or deviceId', { deviceId });
+    return;
+  }
   if (!data) return;
   try {
     await pool.query(
@@ -195,29 +201,29 @@ export async function saveBono(deviceId, data) {
         deviceId,
         data.photoUri || null,
         data.raw_text || '',
-        data.provider || null,
-        data.numero_bono || null,
-        data.fecha_emision || null,
+        data.provider || data.prevision || null,
+        data.numero_bono || data.correlativo || data.folio || null,
+        data.fecha_emision || data.fecha || null,
         data.fecha_atencion || null,
-        data.beneficiario_nombre || null,
-        data.beneficiario_rut || null,
+        data.beneficiario_nombre || data.paciente || null,
+        data.beneficiario_rut || data.paciente_rut || null,
         data.titular_nombre || null,
         data.titular_rut || null,
-        data.prestador_nombre || null,
+        data.prestador_nombre || data.institucion || null,
         data.prestador_rut || null,
-        data.profesional_nombre || null,
+        data.profesional_nombre || data.medico || null,
         data.profesional_rut || null,
         JSON.stringify(data.items || []),
-        parseInt(data.monto_total) || null,
-        parseInt(data.bonificacion_total) || null,
-        parseInt(data.copago_total) || null,
-        parseInt(data.monto_a_pagar) || null,
-        data.confidence || null
+        parseInt(data.monto_total) || 0,
+        parseInt(data.bonificacion_total) || 0,
+        parseInt(data.copago_total) || 0,
+        parseInt(data.monto_a_pagar) || 0,
+        data.confidence || 1.0
       ]
     );
-    console.log('[db] bono saved for device', deviceId);
+    console.log('[db] bono saved successfully for device', deviceId);
   } catch (err) {
-    console.error('[db] saveBono error', err.message);
+    console.error('[db] saveBono ERROR:', err.message);
   }
 }
 
